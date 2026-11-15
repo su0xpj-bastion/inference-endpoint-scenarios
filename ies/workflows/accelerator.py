@@ -8,7 +8,10 @@ A kernel, compiler, or firmware regression moves these before it moves anything 
 """
 from __future__ import annotations
 
+import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from ..core import Check, Ctx, client_overhead, guarded, mean, pct, server_decode_tps, tbt
 
@@ -128,7 +131,89 @@ def logprob_stability(ctx: Ctx) -> Check:
                  gated=ctx.slo["determinism_gated"], metrics={"max_drift": drift})
 
 
-CHECKS = (decode_throughput, ttft, prefill_scaling, prompt_cache, determinism, logprob_stability)
+INVARIANCE_PROMPT = "Explain in detail how a wafer-scale processor schedules decode."
+
+
+def load_invariance(ctx: Ctx) -> Check:
+    """Same T=0 request alone vs inside a busy batch. Batch-size-dependent kernels (reduction
+    order changes with batch shape) make outputs depend on load, a known GPU serving bug."""
+    params = {"temperature": 0, "seed": 9, "max_completion_tokens": 48}
+    alone = [ctx.chat(INVARIANCE_PROMPT, **params).content for _ in range(2)]
+    loaded = []
+    for r in range(ctx.slo["invariance_rounds"]):
+        others = [f"Write a detailed paragraph about topic {r}-{i}." for i in range(ctx.slo["invariance_load"])]
+        with ThreadPoolExecutor(len(others) + 1) as pool:
+            futs = [pool.submit(ctx.chat, o, max_completion_tokens=64) for o in others]
+            target = pool.submit(ctx.chat, INVARIANCE_PROMPT, **params)
+            [f.result() for f in futs]
+            loaded.append(target.result().content)
+    base = alone[0]
+    alone_same = all(a == base for a in alone)
+    loaded_same = sum(x == base for x in loaded)
+    gated = ctx.slo["invariance_gated"]
+    if not alone_same:
+        return Check(W, "load_invariance", "fail" if gated else "warn",
+                     "not even reproducible alone at T=0 + seed; load effect can't be isolated", gated=gated)
+    ok = loaded_same == len(loaded)
+    return Check(W, "load_invariance", "pass" if ok else ("fail" if gated else "warn"),
+                 f"T=0 output identical alone (2/2) and under load with {ctx.slo['invariance_load']} concurrent "
+                 f"requests in {loaded_same}/{len(loaded)} rounds", gated=gated,
+                 metrics={"loaded_identical": loaded_same, "rounds": len(loaded)})
+
+
+NUMERICS_PROMPTS = ("Explain in detail what a KV cache stores.", "Write a detailed story about a lighthouse.",
+                    "Explain in detail how gradient checkpointing saves memory.")
+
+
+def _numerics_path(ctx: Ctx) -> Path:
+    return Path(ctx.baseline_dir) / f"{ctx.target}-{ctx.model}-numerics.json"
+
+
+def logprob_baseline(ctx: Ctx) -> Check:
+    """Top-1 logprobs on fixed prompts vs the recorded baseline. Same backend build: drift must stay
+    at the noise floor. New build (system_fingerprint changed): drift is reported, since numerics
+    are expected to move and the size of the move is the information."""
+    now: dict[str, list] = {}
+    fps = set()
+    for prompt in NUMERICS_PROMPTS:
+        c = ctx.chat(prompt, temperature=0, seed=1234, max_completion_tokens=24, logprobs=True, top_logprobs=1)
+        now[prompt] = [[t, lp] for t, lp in c.logprobs]
+        fps.add(c.fingerprint)
+    fp = ",".join(sorted(fps))
+    path = _numerics_path(ctx)
+    base = None
+    if path.exists():
+        with path.open("r", encoding="utf-8") as fh:
+            base = json.load(fh)
+    if ctx.update_baseline:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"fingerprint": fp, "logprobs": now}, indent=1) + "\n")
+    if base is None:
+        return Check(W, "logprob_baseline", "warn", f"no numerics baseline at {path}; run --update-baseline",
+                     gated=False)
+    drift, compared, diverged = 0.0, 0, []
+    for prompt, cur in now.items():
+        old = base["logprobs"].get(prompt, [])
+        for i, ((ta, la), (tb, lb)) in enumerate(zip(old, cur)):
+            if ta != tb:
+                diverged.append(i)
+                break
+            drift = max(drift, abs(la - lb))
+            compared += 1
+    tol = ctx.slo["max_logprob_drift"]
+    detail = (f"max |dlogprob| vs baseline {drift:.2e} over {compared} tokens (tol {tol:.0e}); "
+              f"token paths diverged at {diverged or 'none'}")
+    if base["fingerprint"] != fp:
+        return Check(W, "logprob_baseline", "warn",
+                     f"new backend build {base['fingerprint']} -> {fp}: {detail}", gated=False,
+                     metrics={"drift": drift})
+    bad = drift > tol or bool(diverged)
+    return Check(W, "logprob_baseline", "fail" if bad else "pass", f"same build {fp}: {detail}",
+                 gated=ctx.slo["determinism_gated"], metrics={"drift": drift})
+
+
+CHECKS = (decode_throughput, ttft, prefill_scaling, prompt_cache, determinism, logprob_stability,
+          load_invariance, logprob_baseline)
 
 
 def run(ctx: Ctx) -> list[Check]:

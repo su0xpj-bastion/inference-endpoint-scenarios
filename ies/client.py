@@ -68,6 +68,7 @@ class Call:
     usage_seen: bool = False
     headers: dict[str, str] = field(default_factory=dict)
     logprobs: list[tuple[str, float]] = field(default_factory=list)
+    top_logprobs: list[list[tuple[str, float]]] = field(default_factory=list)
 
 
 ENCODINGS = {
@@ -146,12 +147,14 @@ def _take_usage(call: Call, usage: object, time_info: object) -> None:
 
 
 def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: bool,
-          params: dict) -> Call:
+          params: dict, capture: list | None = None) -> Call:
     call = Call()
     t0 = time.perf_counter()
     if not stream:
         raw = client.chat.completions.with_raw_response.create(model=model, messages=messages, **params)
         resp = raw.parse()
+        if capture is not None:
+            capture.append(("response", resp.to_dict()))
         call.wall = time.perf_counter() - t0
         call.headers = {k.lower(): v for k, v in raw.headers.items() if k.lower().startswith("x-ratelimit")}
         call.fingerprint = resp.system_fingerprint
@@ -163,6 +166,8 @@ def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: b
             call.tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments})
         if choice.logprobs is not None and choice.logprobs.content:
             call.logprobs = [(c.token, c.logprob) for c in choice.logprobs.content]
+            call.top_logprobs = [[(t.token, t.logprob) for t in c.top_logprobs or []]
+                                 for c in choice.logprobs.content]
         _take_usage(call, resp.usage, resp.time_info)
         return call
 
@@ -175,6 +180,8 @@ def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: b
     with raw.parse() as stream:
         for chunk in stream:
             call.chunks += 1
+            if capture is not None:
+                capture.append(("chunk", chunk.to_dict()))
             call.fingerprint = chunk.system_fingerprint or call.fingerprint
             if chunk.choices and chunk.choices[0].delta is not None:
                 delta = chunk.choices[0].delta
@@ -207,13 +214,13 @@ def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: b
 
 
 def chat(client: cerebras.Cerebras, model: str, messages: list[dict], *, stream: bool = False,
-         budget: Budget | None = None, **params: object) -> Call:
+         budget: Budget | None = None, capture: list | None = None, **params: object) -> Call:
     """Chat Completions with jittered / retry-after backoff on 429 only."""
     for attempt in range(MAX_ATTEMPTS):
         if budget is not None:
             budget.take()
         try:
-            call = _once(client, model, messages, stream, params)
+            call = _once(client, model, messages, stream, params, capture)
             call.attempts = attempt + 1
             return call
         except cerebras.RateLimitError as exc:

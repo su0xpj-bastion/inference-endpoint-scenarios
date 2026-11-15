@@ -36,6 +36,23 @@ Faults (set on the server object, or MOCK_FAULTS=a,b for `python -m mockserve`):
   cache_miss         prompt cache never hits
   context_truncated  each message silently clipped to ~8K tokens (200 OK)
   lossy_gist         the page-6 summary drops its number
+  utf8_split         streamed chunks carry U+FFFD where 4-byte chars (emoji) were split
+  stop_chunk_boundary  stream matches stop sequences only within one chunk
+  logprobs_unsorted  top_logprobs returned in ascending order
+  reasoning_leak     reasoning text inlined into content inside <think> tags
+  harmony_markers    harmony control tokens (<|channel|>...) leak into content
+  reasoning_unbilled reasoning tokens left out of completion_tokens
+  effort_ignored     low / medium / high all produce the same reasoning length
+  budget_stop        reasoning exhausts max tokens but finish_reason says "stop"
+  schema_drift       `created` as a string, stream finish_reason "eos" (off-spec)
+  batch_variant      T=0 output changes when other requests are in flight
+  numerics_shift     logprobs move by 0.03 with the same system_fingerprint
+  fixed_window       rate limit counts a fixed 60 s window instead of a refilling bucket
+  latency_creep      each request a little slower than the last (soak)
+  error_burst        3 of every 40 requests fail with 500 (soak)
+  model_removed      gpt-oss-120b disappears from /v1/models
+  benchmark_noise / benchmark_drift / benchmark_regression
+                     1 / 3 / 15 GSM8K items answered wrong
 """
 from __future__ import annotations
 
@@ -51,12 +68,14 @@ import time
 import uuid
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import msgpack
 
 API_KEY = "mock-key"
 MODELS = ("qwen-3.8-27b", "gpt-oss-120b", "gemma-4-31b")
 NO_REASONING_OK = {"qwen-3.8-27b", "gemma-4-31b"}
+REASONING_LEN = {"low": 20, "medium": 60, "high": 150, "max": 300}
 DECODE_TPS = 2000.0
 SLOW_DECODE_TPS = 200.0
 PREFILL_TPS = 200_000.0
@@ -93,14 +112,28 @@ class State:
         self.cache: set[str] = set()
         self.limited: set[str] = set()
         self.flaky_flip = 0
-        self.window: list[float] = []
+        self.started = time.monotonic()
+        self.bucket = float(RPM_LIMIT)              # token bucket, refills continuously
+        self.bucket_at = self.started
+        self.window_count = 0                       # fixed_window fault
+        self.window_start = self.started
 
     def next_request(self) -> int:
         with self.lock:
             self.requests += 1
             now = time.monotonic()
-            self.window = [t for t in self.window if now - t < 60] + [now]
+            self.bucket = min(float(RPM_LIMIT), self.bucket + (now - self.bucket_at) * RPM_LIMIT / 60.0) - 1
+            self.bucket_at = now
+            if now - self.window_start >= 60:
+                self.window_start, self.window_count = now, 0
+            self.window_count += 1
             return self.requests
+
+    def remaining_requests(self) -> int:
+        with self.lock:
+            if "fixed_window" in self.faults:
+                return max(0, RPM_LIMIT - self.window_count)
+            return max(0, int(self.bucket))
 
 
 def golden_answer(prompt: str, state: State) -> str | None:
@@ -193,8 +226,32 @@ def agent_answer(msgs: list[dict], state: State) -> str:
     return ", ".join(parts) or "No data."
 
 
+GSM_FILE = Path(__file__).resolve().parent.parent / "ies" / "data" / "gsm8k_slice.jsonl"
+GSM: list[dict] = []
+BENCH_FLIPS = {"benchmark_noise": 1, "benchmark_drift": 3, "benchmark_regression": 15}
+
+
+def gsm_answer(prompt: str, state: State) -> str | None:
+    """A 'model' that solves the vendored GSM8K slice; benchmark faults break the first k items."""
+    if not GSM and GSM_FILE.exists():
+        with GSM_FILE.open("r", encoding="utf-8") as fh:
+            GSM.extend(json.loads(line) for line in fh if line.strip())
+    for idx, item in enumerate(GSM):
+        if item["question"] in prompt:
+            flips = max([k for f, k in BENCH_FLIPS.items() if f in state.faults] or [0])
+            ans = item["answer"]
+            if idx < flips:
+                ans = str(int(float(ans)) + 1)
+            return f"Working through the quantities step by step.\nAnswer: {ans}"
+    return None
+
+
 def context_answer(msgs: list[dict], prompt: str, state: State) -> str | None:
     """Answers that depend on what actually reached the model: history and long context."""
+    if (g := gsm_answer(prompt, state)) is not None:
+        return g
+    if "bat and a ball cost" in prompt:
+        return "$0.05"
     if "What is my project codename" in prompt:
         history = "\n".join(str(m.get("content") or "") for m in msgs[:-1])
         m = re.search(r"codename is ([A-Z0-9-]+)", history)
@@ -254,22 +311,31 @@ def generate(body: dict, state: State, rid: str) -> dict:
         long_form = any(w in prompt.lower() for w in ("essay", "story", "detailed", "explain"))
         n = 400 if long_form else 30
         reproducible = (temp == 0 or seed is not None) and "nondeterministic" not in state.faults
-        rng = random.Random(_stable(prompt, seed, temp) if reproducible else None)
+        with state.lock:
+            busy = len(state.inflight) > 1 and "batch_variant" in state.faults
+        rng = random.Random(_stable(prompt, seed, temp, "busy" if busy else "") if reproducible else None)
         out["content"] = " ".join(rng.choice(VOCAB) for _ in range(n)) + "."
 
-    effort = body.get("reasoning_effort")
+    effort = body.get("reasoning_effort") or "high"           # qwen default per API reference
     model = body.get("model")
     if not (effort == "none" and model in NO_REASONING_OK):
-        out["reasoning"] = "Let me think about this step by step before answering."
+        n = 60 if "effort_ignored" in state.faults else REASONING_LEN.get(effort, 150)
+        words = "Let me think about this step by step and check the arithmetic before answering".split()
+        out["reasoning"] = " ".join(words[i % len(words)] for i in range(n)) + "."
     return out
+
+
+def stops_of(body: dict) -> list[str]:
+    return [s for s in ([body["stop"]] if isinstance(body.get("stop"), str) else body.get("stop") or []) if s]
 
 
 def apply_limits(text: str, body: dict, state: State, reasoning_tokens: int = 0) -> tuple[str, str]:
     """max_completion_tokens covers reasoning + content, as the real API documents."""
     finish = "stop"
-    for s in ([body["stop"]] if isinstance(body.get("stop"), str) else body.get("stop") or []):
-        if s and s in text:
-            text = text[: text.index(s)]
+    if not (body.get("stream") and "stop_chunk_boundary" in state.faults):   # fault: per-chunk matching only
+        for s in stops_of(body):
+            if s in text:
+                text = text[: text.index(s)]
     limit = body.get("max_completion_tokens") or (
         None if "max_tokens_alias_ignored" in state.faults else body.get("max_tokens"))
     toks = TOKEN_RE.findall(text)
@@ -287,10 +353,14 @@ def logprob_entries(tokens: list[str], seed: object, state: State, top: int) -> 
         lp = -((_stable(t, i, seed) % 1000) / 1000.0) * 2.0
         if noise:
             lp += noise.uniform(-1e-2, 1e-2)
+        if "numerics_shift" in state.faults:           # same build, numerics moved (kernel / compiler change)
+            lp -= 0.03
         alts = [{"token": t, "logprob": lp, "bytes": list(t.encode())}]
         for j in range(1, top):
             alt = VOCAB[_stable(t, i, j) % len(VOCAB)]
             alts.append({"token": alt, "logprob": lp - j, "bytes": list(alt.encode())})
+        if "logprobs_unsorted" in state.faults:
+            alts.reverse()
         out.append({"token": t, "logprob": lp, "bytes": list(t.encode()), "top_logprobs": alts[:top]})
     return out
 
@@ -369,13 +439,11 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _rl_headers(self) -> dict:
-        st = self.state
-        with st.lock:
-            used = len(st.window)
+        remaining = self.state.remaining_requests()
         return {"x-ratelimit-limit-requests-minute": str(RPM_LIMIT),
-                "x-ratelimit-remaining-requests-minute": str(max(0, RPM_LIMIT - used)),
+                "x-ratelimit-remaining-requests-minute": str(remaining),
                 "x-ratelimit-limit-tokens-minute": "150000",
-                "x-ratelimit-remaining-tokens-minute": str(max(0, 150000 - used * 200))}
+                "x-ratelimit-remaining-tokens-minute": str(max(0, 150000 - (RPM_LIMIT - remaining) * 200))}
 
     # ---------- routes
     def do_GET(self) -> None:
@@ -385,7 +453,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.rstrip("/") == "/v1/models":
             return self._json(200, {"object": "list", "data": [
-                {"id": m, "object": "model", "created": 0, "owned_by": "Cerebras"} for m in MODELS]})
+                {"id": m, "object": "model", "created": 0, "owned_by": "Cerebras"} for m in MODELS
+                if not ("model_removed" in self.state.faults and m == "gpt-oss-120b")]})
         self._error(404, f"no route {self.path}", "not_found_error")
 
     def do_POST(self) -> None:
@@ -402,6 +471,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, f"could not parse request body: {exc}", "invalid_request_error")
         body = apply_context_faults(body, st)
         n = st.next_request()
+        if "error_burst" in st.faults and n % 40 in (20, 21, 22):
+            return self._error(500, "internal error: worker restarted", "server_error")
 
         pkey = hashlib.sha256(json.dumps(body.get("messages"), sort_keys=True).encode()).hexdigest()
         with st.lock:
@@ -425,6 +496,18 @@ class Handler(BaseHTTPRequestHandler):
                                "temperature")
         if body.get("n", 1) != 1:
             return self._error(400, "n > 1 is not supported", "invalid_request_error", "n")
+        for name, lo, hi in (("top_p", 0, 1), ("frequency_penalty", -2, 2), ("presence_penalty", -2, 2),
+                             ("top_logprobs", 0, 20)):
+            v = body.get(name)
+            if v is not None and not lo <= v <= hi:
+                return self._error(400, f"{name} must be between {lo} and {hi}", "invalid_request_error", name)
+        stops = body.get("stop")
+        if isinstance(stops, list) and len(stops) > 4:
+            return self._error(400, "at most 4 stop sequences", "invalid_request_error", "stop")
+        mct = body.get("max_completion_tokens") or body.get("max_tokens")
+        if mct is not None and mct < 1:
+            return self._error(400, "max_completion_tokens must be >= 1", "invalid_request_error",
+                               "max_completion_tokens")
         if not body.get("messages"):
             return self._error(400, "messages must be non-empty", "invalid_request_error", "messages")
 
@@ -440,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
     def _complete(self, body: dict, rid: str) -> None:
         st = self.state
         t0 = time.perf_counter()
-        created = int(time.time())
+        created: int | str = str(int(time.time())) if "schema_drift" in st.faults else int(time.time())
         fp = "fp_mock_v2" if "fingerprint_v2" in st.faults else "fp_mock_v1"
         msgs = body["messages"]
         all_text = "\n".join(str(m.get("content") or "") for m in msgs)
@@ -467,18 +550,31 @@ class Handler(BaseHTTPRequestHandler):
 
         gen = generate(body, st, rid)
         reasoning_tokens = ntokens(gen["reasoning"])
+        limit = body.get("max_completion_tokens") or body.get("max_tokens")
+        if limit and reasoning_tokens > limit and "ignore_max_tokens" not in st.faults:
+            gen["reasoning"] = " ".join(gen["reasoning"].split()[:limit])     # reasoning consumes the budget
+            reasoning_tokens = ntokens(gen["reasoning"])
         text, finish = apply_limits(gen["content"], body, st, reasoning_tokens)
+        if "budget_stop" in st.faults and finish == "length" and not text:
+            finish = "stop"                                                  # empty answer reported as complete
+        if "reasoning_leak" in st.faults and gen["reasoning"]:
+            text = f"<think>{gen['reasoning']}</think>{text}"
+        if "harmony_markers" in st.faults:
+            text = f"<|channel|>final<|message|>{text}"
         tool_calls = gen["tool_calls"]
         if tool_calls:
             finish = "tool_calls"
         out_tokens = TOKEN_RE.findall(text)
-        completion_tokens = len(out_tokens) + reasoning_tokens + (8 if tool_calls else 0)
+        billed_reasoning = 0 if "reasoning_unbilled" in st.faults else reasoning_tokens
+        completion_tokens = len(out_tokens) + billed_reasoning + (8 if tool_calls else 0)
 
         with st.lock:
             inflight = len(st.inflight)
         queue = 0.0005 + (0.08 * inflight if "contention" in st.faults else 0.0)
         prompt_time = (prompt_tokens - cached) / PREFILL_TPS
         pre = queue + prompt_time + (0.4 if "slow_ttft" in st.faults else 0.0)
+        if "latency_creep" in st.faults:                  # slow leak: every request a little slower
+            pre += 0.03 * max(0, st.requests - 20)        # shows up only after a while, like a leak
         tps = SLOW_DECODE_TPS if "slow_decode" in st.faults else DECODE_TPS
         time.sleep(pre)
 
@@ -489,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
         lp = None
         if body.get("logprobs"):
             lp = {"content": logprob_entries(out_tokens, body.get("seed"), st,
-                                             int(body.get("top_logprobs") or 1))}
+                                             int(body.get("top_logprobs") or 1)), "refusal": None}
         base = {"id": f"chatcmpl-{rid}", "created": created, "model": body["model"],
                 "system_fingerprint": fp}
 
@@ -543,11 +639,21 @@ class Handler(BaseHTTPRequestHandler):
                                     "type": "server_error", "code": "server_error"}})
                     return
                 part = "".join(pieces[i:i + CHUNK_TOKENS])
+                if "utf8_split" in st.faults:                 # multi-byte chars split across chunks
+                    part = "".join("\ufffd" if ord(ch) > 0xFFFF else ch for ch in part)
+                cut = [part.index(s) for s in stops_of(body) if s in part] \
+                    if "stop_chunk_boundary" in st.faults else []
+                if cut:
+                    part = part[: min(cut)]
                 time.sleep(ntokens(part) / tps)
                 c = {"index": 0, "delta": {"content": part}}
                 if lp_items:
-                    c["logprobs"] = {"content": lp_items[i:i + CHUNK_TOKENS]}
+                    c["logprobs"] = {"content": lp_items[i:i + CHUNK_TOKENS], "refusal": None}
                 send({**chunk, "choices": [c]})
+                if cut:
+                    break
+        if "schema_drift" in st.faults:
+            finish = "eos"
         final: dict = {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
                        "time_info": time_info(time.perf_counter() - d0)}
         if "stream_no_usage" not in st.faults:

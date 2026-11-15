@@ -21,8 +21,9 @@ FAULT_CATCH = {
     "ignore_max_tokens": (["inference"], {"inference.max_tokens_length"}),
     "midstream_error": (["inference", "accelerator"],
                         {"inference.stream_usage_parity", "accelerator.decode_throughput", "accelerator.ttft"}),
-    "nondeterministic": (["accelerator"], {"accelerator.determinism"}),
-    "logprob_noise": (["accelerator"], {"accelerator.logprob_stability"}),
+    "nondeterministic": (["accelerator"], {"accelerator.determinism", "accelerator.load_invariance",
+                                           "accelerator.logprob_baseline"}),
+    "logprob_noise": (["accelerator"], {"accelerator.logprob_stability", "accelerator.logprob_baseline"}),
     "contention": (["cluster"], {"cluster.concurrency_latency"}),
     "crosstalk": (["cluster"], {"cluster.request_isolation"}),
     "gzip_ignored": (["wire"], {"wire.wire_equivalence", "wire.wire_ttft"}),
@@ -37,6 +38,23 @@ FAULT_CATCH = {
                                       "conversation.conversation_prefill_flat"}),
     "context_truncated": (["longctx"], {"longctx.needle_recall", "longctx.context_accounting"}),
     "lossy_gist": (["longctx"], {"longctx.gist_chain"}),
+    "utf8_split": (["inference"], {"inference.stream_integrity"}),
+    "stop_chunk_boundary": (["inference"], {"inference.stream_integrity"}),
+    "logprobs_unsorted": (["inference"], {"inference.logprobs_contract"}),
+    # leaked text is billed as completion tokens, so the budget check trips too
+    "reasoning_leak": (["reasoning"], {"reasoning.reasoning_separation", "reasoning.reasoning_budget"}),
+    "harmony_markers": (["reasoning"], {"reasoning.reasoning_separation", "reasoning.reasoning_budget"}),
+    "reasoning_unbilled": (["reasoning"], {"reasoning.reasoning_billing"}),
+    "effort_ignored": (["reasoning"], {"reasoning.reasoning_effort_scaling"}),
+    "budget_stop": (["reasoning"], {"reasoning.reasoning_budget"}),
+    # one off-spec enum value makes the typed SDK give up on the whole chunk
+    "schema_drift": (["inference", "schema"], {"inference.stream_usage_parity", "inference.tool_call_streamed",
+                                               "inference.stream_integrity", "schema.schema_conformance"}),
+    "batch_variant": (["accelerator"], {"accelerator.load_invariance"}),
+    "numerics_shift": (["accelerator"], {"accelerator.logprob_baseline"}),
+    "fixed_window": (["cluster"], {"cluster.rate_limit_refill"}),
+    "latency_creep": (["soak"], {"soak.soak_latency_creep"}),
+    "error_burst": (["soak"], {"soak.soak_errors"}),
 }
 
 
@@ -96,3 +114,21 @@ def test_missing_baseline_warns_but_does_not_block(make_ctx, tmp_path):
     checks = WORKFLOWS["release"](make_ctx(baseline_dir=str(tmp_path)))
     assert next(c for c in checks if c.name == "baseline_diff").status == "warn"
     assert next(c for c in checks if c.name == "release_gate").metrics["gate"] == "GO"
+
+
+def test_numerics_move_on_a_new_build_is_reported_not_failed(make_ctx):
+    checks = WORKFLOWS["accelerator"](make_ctx({"numerics_shift", "fingerprint_v2"}))
+    c = next(c for c in checks if c.name == "logprob_baseline")
+    assert c.status == "warn" and "new backend build" in c.detail and c.metrics["drift"] > 0.02
+
+
+def test_removed_model_is_a_deprecation_warning(make_ctx):
+    c = next(c for c in WORKFLOWS["release"](make_ctx({"model_removed"})) if c.name == "models_diff")
+    assert c.status == "warn" and "gpt-oss-120b" in c.detail
+
+
+@pytest.mark.parametrize("fault,gate", [(None, "GO"), ("benchmark_noise", "GO"),
+                                        ("benchmark_drift", "INCONCLUSIVE"), ("benchmark_regression", "NO-GO")])
+def test_benchmark_gate_separates_noise_from_regression(make_ctx, fault, gate):
+    c = WORKFLOWS["benchmark"](make_ctx({fault} if fault else set()))[0]
+    assert c.metrics["gate"] == gate, c.detail

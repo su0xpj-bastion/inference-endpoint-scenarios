@@ -27,7 +27,7 @@
     "isolation_requests": 8,
     "release_reps": 2,
     "min_golden_pass_rate": 1.0,
-    "max_requests": 400,
+    "max_requests": 800,
     "wire_equiv_tokens": 12000,
     "wire_size_tokens": [
       0,
@@ -71,7 +71,34 @@
         0.9
       ]
     ],
-    "conv_uncached_share_max": 0.25
+    "conv_uncached_share_max": 0.25,
+    "reasoning_models": [
+      "qwen-3.8-27b",
+      "gpt-oss-120b",
+      "gemma-4-31b"
+    ],
+    "reasoning_levels": [
+      "none",
+      "low",
+      "medium",
+      "high"
+    ],
+    "reasoning_max_tokens": 512,
+    "schema_max_samples": 400,
+    "invariance_rounds": 2,
+    "invariance_load": 7,
+    "invariance_gated": true,
+    "refill_wait_s": 1.0,
+    "refill_gated": true,
+    "soak_seconds": 3,
+    "soak_rps": 20,
+    "soak_windows": 3,
+    "soak_creep_cap": 3.0,
+    "bench_items": 50,
+    "bench_max_tokens": 400,
+    "bench_concurrency": 8,
+    "bench_nogo_alpha": 0.01,
+    "bench_go_alpha": 0.1
   },
   "live": {
     "_comment": "Provisional thresholds, calibrated from the first live runs; see docs/STRATEGY.md. Determinism and cache are reported, not gated: the API documents seed as best-effort and caching as automatic.",
@@ -102,7 +129,7 @@
     "isolation_requests": 8,
     "release_reps": 2,
     "min_golden_pass_rate": 0.85,
-    "max_requests": 200,
+    "max_requests": 800,
     "wire_equiv_tokens": 12000,
     "wire_size_tokens": [
       0,
@@ -146,6 +173,33 @@
         0.9
       ]
     ],
-    "conv_uncached_share_max": 0.25
+    "conv_uncached_share_max": 0.25,
+    "reasoning_models": [
+      "qwen-3.8-27b",
+      "gpt-oss-120b",
+      "gemma-4-31b"
+    ],
+    "reasoning_levels": [
+      "none",
+      "low",
+      "medium",
+      "high"
+    ],
+    "reasoning_max_tokens": 1024,
+    "schema_max_samples": 400,
+    "invariance_rounds": 2,
+    "invariance_load": 7,
+    "invariance_gated": false,
+    "refill_wait_s": 10.0,
+    "refill_gated": false,
+    "soak_seconds": 300,
+    "soak_rps": 1,
+    "soak_windows": 5,
+    "soak_creep_cap": 2.0,
+    "bench_items": 50,
+    "bench_max_tokens": 512,
+    "bench_concurrency": 4,
+    "bench_nogo_alpha": 0.01,
+    "bench_go_alpha": 0.1
   }
 }

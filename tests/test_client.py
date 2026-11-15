@@ -48,7 +48,8 @@ def test_midstream_error_raises_instead_of_truncating(mock):
 def test_stream_captures_usage_time_info_and_headers(mock):
     base_url, _ = mock
     c = chat(make_client(API_KEY, base_url), "qwen-3.8-27b",
-             [{"role": "user", "content": "Write a detailed essay."}], stream=True, max_completion_tokens=50)
+             [{"role": "user", "content": "Write a detailed essay."}], stream=True, max_completion_tokens=50,
+             reasoning_effort="none")
     assert c.usage_seen and c.completion_tokens == 50 and c.finish_reason == "length"
     assert c.completion_time and c.ttft is not None and c.fingerprint == "fp_mock_v1"
     assert "x-ratelimit-remaining-requests-minute" in c.headers
@@ -106,3 +107,25 @@ def test_sdk_older_than_minimum_is_refused_with_a_clear_message(monkeypatch):
     monkeypatch.setattr(cerebras, "__version__", "1.50.1")
     with pytest.raises(RuntimeError, match="older than the supported minimum 1.59.0"):
         make_client(API_KEY, "http://127.0.0.1:1")
+
+
+def test_benchmark_statistics():
+    from ies.workflows.benchmark import drop_p_value, extract, wilson
+    assert extract("so 3 + 4 = 7\nAnswer: $1,234") == "1234" and extract("Answer: 5.0") == "5"
+    assert extract("no final line") is None
+    lo, hi = wilson(47, 50)
+    assert 0.83 < lo < 0.85 and 0.97 < hi < 0.99
+    assert drop_p_value(50, 50, 49, 50) > 0.10          # one flip: noise
+    assert 0.01 < drop_p_value(50, 50, 47, 50) < 0.10   # three: inconclusive
+    assert drop_p_value(50, 50, 35, 50) < 0.01          # fifteen: regression
+    assert drop_p_value(40, 50, 45, 50) == pytest.approx(1 - drop_p_value(45, 50, 40, 50), abs=1e-9)
+
+
+def test_all_excludes_soak_and_schema_runs_last(tmp_path, monkeypatch):
+    from ies import cli
+    from ies.workflows import DEFAULT
+    ran = []
+    monkeypatch.setattr(cli, "WORKFLOWS", {n: (lambda ctx, n=n: ran.append(n) or []) for n in cli.WORKFLOWS})
+    assert cli.main(["run", "--target", "mock", "-w", "schema,all", "--out", str(tmp_path)]) == 0
+    assert "soak" not in ran and ran[-1] == "schema" and set(ran) == set(DEFAULT)
+    assert cli.main(["run", "--target", "mock", "-w", "nope", "--out", str(tmp_path)]) == 2

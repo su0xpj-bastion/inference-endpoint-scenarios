@@ -128,6 +128,29 @@ def qualify(ctx: Ctx) -> list[Check]:
     return checks
 
 
+def models_diff(ctx: Ctx) -> Check:
+    """/v1/models vs the recorded list: a removed model is a deprecation users hit as 404s."""
+    ctx.budget.take()
+    ids = sorted(m.id for m in ctx.client.models.list().data)
+    path = Path(ctx.baseline_dir) / f"{ctx.target}-models.json"
+    base = None
+    if path.exists():
+        with path.open("r", encoding="utf-8") as fh:
+            base = json.load(fh)["models"]
+    if ctx.update_baseline:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"models": ids}, indent=1) + "\n")
+    if base is None:
+        return Check(W, "models_diff", "warn", f"no model-list baseline at {path}; {len(ids)} models now",
+                     gated=False)
+    removed, added = sorted(set(base) - set(ids)), sorted(set(ids) - set(base))
+    if ctx.model in removed:
+        return Check(W, "models_diff", "fail", f"model under test {ctx.model} REMOVED from /v1/models")
+    status = "warn" if removed else "pass"
+    return Check(W, "models_diff", status, f"removed {removed or 'none'}; added {added or 'none'}",
+                 gated=False, metrics={"removed": removed, "added": added})
+
+
 def run(ctx: Ctx) -> list[Check]:
     out: list[Check] = []
 
@@ -136,4 +159,5 @@ def run(ctx: Ctx) -> list[Check]:
         return out[-1]
 
     gate = guarded(W, "release_gate", wrapped)
-    return out if out else [gate]
+    checks = out if out else [gate]
+    return checks + [guarded(W, "models_diff", lambda: models_diff(ctx))]

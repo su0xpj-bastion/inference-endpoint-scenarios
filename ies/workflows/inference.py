@@ -153,8 +153,102 @@ def error_contract(ctx: Ctx) -> Check:
     return Check(W, "error_contract", "fail" if bad else "pass", json.dumps(got))
 
 
+PARAM_CASES = (
+    # (label, extra params, expect_ok) -- ranges from the Cerebras API reference
+    ("temperature=0", {"temperature": 0}, True),
+    ("temperature=2", {"temperature": 2}, True),
+    ("temperature=2.01", {"temperature": 2.01}, False),
+    ("top_p=0", {"top_p": 0}, True),
+    ("top_p=1.01", {"top_p": 1.01}, False),
+    ("max_completion_tokens=1", {"max_completion_tokens": 1}, True),
+    ("frequency_penalty=2", {"frequency_penalty": 2}, True),
+    ("frequency_penalty=2.5", {"frequency_penalty": 2.5}, False),
+    ("top_logprobs=20", {"logprobs": True, "top_logprobs": 20}, True),
+    ("top_logprobs=21", {"logprobs": True, "top_logprobs": 21}, False),
+    ("n=2", {"n": 2}, False),
+    ("4 stop sequences", {"stop": ["a1", "b2", "c3", "d4"]}, True),
+    ("5 stop sequences", {"stop": ["a1", "b2", "c3", "d4", "e5"]}, False),
+)
+
+
+def param_boundaries(ctx: Ctx) -> Check:
+    """Each documented limit: in-range accepted, out-of-range rejected with 400/422, never a silent 200."""
+    wrong = []
+    for label, extra, expect_ok in PARAM_CASES + (("empty messages", {"messages": []}, False),):
+        kwargs = {"model": ctx.model, "messages": [{"role": "user", "content": "Reply with only: ok"}],
+                  "max_completion_tokens": 4, **ctx.base_params, **extra}
+        for attempt in range(MAX_ATTEMPTS):
+            ctx.budget.take()
+            try:
+                ctx.client.chat.completions.create(**kwargs)
+                got = "200"
+                break
+            except cerebras.RateLimitError:
+                got = "429"
+                time.sleep(2 ** attempt * 0.05 + random.random() * 0.05)
+                continue
+            except cerebras.APIStatusError as exc:
+                got = str(exc.status_code)
+                break
+        ok = got == "200" if expect_ok else got in ("400", "422")
+        if not ok:
+            wrong.append(f"{label}: {got} (want {'200' if expect_ok else '400/422'})")
+    total = len(PARAM_CASES) + 1
+    return Check(W, "param_boundaries", "fail" if wrong else "pass",
+                 f"{total - len(wrong)}/{total} limits behave as documented" + (f"; {wrong}" if wrong else ""))
+
+
+UNICODE = "東京で会いましょう 🚀🌏 naïve café Ωmega"
+
+
+def stream_integrity(ctx: Ctx) -> Check:
+    """Multi-byte text and a stop sequence spanning chunk boundaries survive streaming."""
+    problems = []
+    prompt = f"Repeat exactly: {UNICODE}"
+    s = ctx.chat(prompt, stream=True, temperature=0, seed=4, max_completion_tokens=64)
+    n = ctx.chat(prompt, temperature=0, seed=4, max_completion_tokens=64)
+    if "\ufffd" in s.content:
+        problems.append("U+FFFD replacement char in streamed text (multi-byte split)")
+    if s.content != n.content:
+        problems.append(f"stream {s.content!r} != non-stream {n.content!r}")
+    elif UNICODE not in s.content:
+        problems.append(f"text not repeated intact: {s.content!r}")
+    st = ctx.chat("Repeat exactly: one two three brown fox jumps over the lazy dog", stream=True,
+                  temperature=0, stop=["brown fox"], max_completion_tokens=32)
+    if "fox" in st.content or "brown fox" in st.content:
+        problems.append(f"stop sequence spanning chunks leaked: {st.content!r}")
+    return Check(W, "stream_integrity", "fail" if problems else "pass",
+                 "; ".join(problems) or f"multi-byte text intact over {s.chunks} chunks; "
+                                         f"cross-chunk stop -> {st.content.strip()!r}")
+
+
+def logprobs_contract(ctx: Ctx) -> Check:
+    k = 5
+    c = ctx.chat("Explain in detail what a KV cache stores.", temperature=0, seed=2, max_completion_tokens=24,
+                 logprobs=True, top_logprobs=k)
+    if not c.top_logprobs:
+        return Check(W, "logprobs_contract", "fail", "logprobs requested, none returned")
+    problems = []
+    for i, ((tok, lp), top) in enumerate(zip(c.logprobs, c.top_logprobs)):
+        vals = [v for _, v in top]
+        if len(top) != k:
+            problems.append(f"pos {i}: {len(top)} top_logprobs (want {k})")
+        if vals != sorted(vals, reverse=True):
+            problems.append(f"pos {i}: top_logprobs not sorted")
+        if any(v > 1e-9 for v in vals + [lp]):
+            problems.append(f"pos {i}: logprob > 0")
+        if top and tok != top[0][0]:
+            problems.append(f"pos {i}: T=0 chose {tok!r}, not top-1 {top[0][0]!r}")
+        if len(problems) >= 3:
+            break
+    return Check(W, "logprobs_contract", "fail" if problems else "pass",
+                 "; ".join(problems) or f"{len(c.top_logprobs)} positions: k={k}, sorted, <= 0, "
+                                         "T=0 choice is top-1")
+
+
 CHECKS = (models_list, usage_accounting, stream_usage_parity, max_tokens_length, stop_sequence,
-          structured_output, tool_call, tool_call_streamed, reasoning_off, error_contract)
+          structured_output, tool_call, tool_call_streamed, reasoning_off, error_contract,
+          param_boundaries, stream_integrity, logprobs_contract)
 
 
 def run(ctx: Ctx) -> list[Check]:

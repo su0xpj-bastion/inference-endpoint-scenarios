@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from .client import MAX_ATTEMPTS, Budget, chat, make_client
 from .core import Check, Ctx, verdict
-from .workflows import WORKFLOWS
+from .workflows import DEFAULT, WORKFLOWS
 
 MODEL = "qwen-3.8-27b"
 SLO_FILE = Path(__file__).resolve().parent.parent / "slo.json"
@@ -75,7 +75,16 @@ def cmd_run(args: argparse.Namespace) -> int:
               base_params={"reasoning_effort": "none"} if args.model in NO_REASONING else {},
               baseline_dir=args.baselines, update_baseline=args.update_baseline,
               api_key=api_key, base_url=base_url)
-    names = list(WORKFLOWS) if args.workflow == "all" else args.workflow.split(",")
+    names: list[str] = []
+    for part in args.workflow.split(","):
+        for name in (DEFAULT if part == "all" else [part]):
+            if name not in WORKFLOWS:
+                print(f"[ERROR] unknown scenario {name!r}; choose from {', '.join(WORKFLOWS)}", file=sys.stderr)
+                return 2
+            if name not in names:
+                names.append(name)
+    if "schema" in names:                       # validate everything the others produced
+        names = [n for n in names if n != "schema"] + ["schema"]
     checks: list[Check] = []
     try:
         for name in names:

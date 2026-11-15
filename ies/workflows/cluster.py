@@ -131,7 +131,39 @@ def rate_limit_headroom(ctx: Ctx) -> Check:
     return Check(W, "rate_limit_headroom", "info", detail, gated=False, metrics=h)
 
 
-CHECKS = (error_rate, retry_absorption, concurrency_latency, request_isolation, rate_limit_headroom)
+def _remaining(headers: dict[str, str]) -> tuple[str, int] | None:
+    for k, v in sorted(headers.items()):
+        if "remaining" in k and "request" in k:
+            try:
+                return k, int(float(v))
+            except ValueError:
+                return None
+    return None
+
+
+def rate_limit_refill(ctx: Ctx) -> Check:
+    """Cerebras documents token-bucket limits that refill continuously, not fixed windows.
+    After an idle gap the remaining-requests count must recover (>= the previous reading),
+    where a fixed window would keep counting down until the window resets."""
+    a = ctx.chat("Reply with only: ok", max_completion_tokens=4)
+    first = _remaining(a.headers)
+    if first is None:
+        return Check(W, "rate_limit_refill", "info",
+                     f"no remaining-requests header; headers seen {sorted(a.headers) or 'none'}", gated=False)
+    time.sleep(ctx.slo["refill_wait_s"])
+    b = ctx.chat("Reply with only: ok", max_completion_tokens=4)
+    second = _remaining(b.headers)
+    if second is None:
+        return Check(W, "rate_limit_refill", "fail", f"{first[0]} missing on the second response")
+    ok = second[1] >= first[1]
+    return Check(W, "rate_limit_refill", "pass" if ok else ("fail" if ctx.slo["refill_gated"] else "warn"),
+                 f"{first[0]}: {first[1]} -> {second[1]} after {ctx.slo['refill_wait_s']}s idle "
+                 f"({'refilled: token bucket' if ok else 'still falling: fixed window?'})",
+                 gated=ctx.slo["refill_gated"])
+
+
+CHECKS = (error_rate, retry_absorption, concurrency_latency, request_isolation, rate_limit_headroom,
+          rate_limit_refill)
 
 
 def run(ctx: Ctx) -> list[Check]:

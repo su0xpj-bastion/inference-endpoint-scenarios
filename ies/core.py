@@ -35,12 +35,13 @@ class Ctx:
     update_baseline: bool = False
     api_key: str | None = None
     base_url: str | None = None
+    captured: list = field(default_factory=list)   # raw responses / chunks, for schema conformance
 
     def chat(self, messages: list[dict] | str, *, stream: bool = False, **params: object) -> Call:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         return chat(self.client, self.model, messages, stream=stream, budget=self.budget,
-                    **{**self.base_params, **params})
+                    capture=self.captured, **{**self.base_params, **params})
 
 
 def pct(values: list[float], q: float) -> float:

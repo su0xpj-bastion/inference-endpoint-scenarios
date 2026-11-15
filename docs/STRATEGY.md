@@ -1,4 +1,4 @@
-# Strategy: nine scenarios against one hosted inference endpoint
+# Strategy: thirteen scenarios against one hosted inference endpoint
 
 ## One client, four questions
 Every workflow goes through the same `client.chat()`: same retry policy (429 only; `retry-after` first, then `2**attempt + jitter`; SDK retries off so retries are counted, not hidden), same capture (usage, `time_info`, fingerprint, rate-limit headers, per-chunk timestamps). A difference between workflows is then a difference in the question asked, never in the plumbing.
@@ -31,6 +31,19 @@ Most third-party tooling reaches Cerebras through the OpenAI SDK, so compatibili
 
 ## Silent context loss
 Conversation and Long context both target 200-OK failures where the model never saw part of the prompt. Recall checks catch it when the lost part mattered; `prompt_tokens` accounting catches it even when it didn't (a clipped haystack whose needle happened to survive). The cache checks use the uncached share of each turn's prompt, not prefill time: with a large fixed system prompt, total prefill time barely moves even with no cache at all, so it can't distinguish a working cache from a dead one.
+
+## Contract checks that cost nothing
+Schema conformance validates the traffic the other scenarios already produced against the official OpenAPI spec, so every request doubles as a contract test. It found a useful property in the mock run: a single off-spec enum value (`finish_reason: "eos"`) makes a typed SDK fall back to raw dicts for the whole chunk, so one server-side typo breaks every client that reads `chunk.choices[0].delta`. That's why off-spec values gate, while extra fields (Cerebras's `time_info`, `reasoning`) are only listed: the spec allows them and clients ignore them.
+
+## Accelerator effects you can see from outside
+- **Load invariance**: GPU kernels can reduce in a different order depending on batch shape, so a T=0 request can answer differently when the server is busy. The check holds the request fixed and varies only the surrounding load.
+- **Numerics baseline**: logprobs on fixed prompts are recorded with the `system_fingerprint`. On the same build, drift must stay at the noise floor (a fail means numerics changed without a release). On a new build, drift is reported, because the size of the move is what the release owner needs.
+
+## Statistical release gate
+Eight golden cases catch broken answers; they can't tell a small quality drop from noise. The GSM8K slice can: a one-sided two-proportion test against the qualified baseline gives NO-GO only for a significant drop (p < 0.01), GO when there's no evidence of one (p ≥ 0.10), and INCONCLUSIVE in between, which means "run a bigger slice", not "ship" or "block". With 50 items, 1 flip is noise (p=0.16), 3 is inconclusive (p=0.04), 15 is a regression.
+
+## Soak
+Short runs miss slow failures (leaks, a node degrading, connection exhaustion). The soak compares the last window to the first at a rate far below limits, so a creep stands out against its own baseline rather than a fixed threshold.
 
 ## Client SDK is part of the release
 The SDK matrix runs the suite across pinned SDK releases plus a non-blocking "latest" canary. It found that SDK < 1.59 returns a nested usage field as a dict, which led to a declared minimum version and to newer API params going through `extra_body`.
