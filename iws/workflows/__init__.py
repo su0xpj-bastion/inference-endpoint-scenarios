@@ -1,4 +1,4 @@
-"""The four SDET workflows. Each takes a Ctx and returns a list of Checks."""
+"""The four scenarios: Inference, Accelerator, Cluster, Release. Each takes a Ctx and returns a list of Checks."""
 from __future__ import annotations
 
 from . import accelerator, cluster, inference, release

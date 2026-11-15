@@ -1,4 +1,4 @@
-# Strategy: testing a hosted inference platform from four seats
+# Strategy: four scenarios against one hosted inference endpoint
 
 ## One client, four questions
 Every workflow goes through the same `client.chat()`: same retry policy (429 only; `retry-after` first, then `2**attempt + jitter`; SDK retries off so retries are counted, not hidden), same capture (usage, `time_info`, fingerprint, rate-limit headers, per-chunk timestamps). A difference between workflows is then a difference in the question asked, never in the plumbing.

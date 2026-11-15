@@ -1,1 +1,1 @@
-"""iws: SDET workflows (inference, accelerator, cluster, release) for the Cerebras Inference API."""
+"""iws: inference workflow scenarios (Inference, Accelerator, Cluster, Release) for the Cerebras Inference API."""

@@ -1,4 +1,4 @@
-"""Inference SDET: the API contract a client depends on.
+"""Inference: the API contract a client depends on.
 
 Things that break silently while the endpoint keeps returning 200: usage that
 doesn't add up (billing), a stream that drops usage (metering), max tokens not

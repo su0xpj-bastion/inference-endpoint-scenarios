@@ -1,15 +1,15 @@
 # inference-workflow-scenarios
 
-One harness, four SDET workflows, run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
+One harness, four scenarios (Inference, Accelerator, Cluster, Release), run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
 
-The four roles that test an inference platform look at the same endpoint and ask different questions:
+Each scenario looks at the same endpoint and asks a different question:
 
-| Workflow | Role it represents | What it proves from the API | Example regression it catches |
-|---|---|---|---|
-| `inference` | Inference / API SDET | The client contract: usage arithmetic, stream usage, `max_completion_tokens`, stop sequences, strict JSON schema, tool calls (incl. streamed argument reassembly), `reasoning_effort=none`, error codes 401/404/400 | `total_tokens` ≠ prompt + completion (billing), stream drops usage (metering) |
-| `accelerator` | GPU / accelerator SDET | Hardware behaviour as the API exposes it: server decode tok/s (`time_info.completion_time`), prefill rate vs prompt length, TTFT split into queue / prefill / network, prompt-cache effect, T=0 reproducibility, logprob drift | decode 2,000 → 200 tok/s (kernel regression); same tokens but logprobs drift (numerics) |
-| `cluster` | Cluster / capacity SDET | Concurrency sweep 1→4→8: latency inflation, error rate after retries, 429 absorption (`retry-after`, then jittered backoff), rate-limit headroom headers, request isolation | latency grows with in-flight load; a request receives *another* request's answer |
-| `release` | Release SDET | Golden suite with checkable answers, repeated at T=0, diffed against a recorded baseline with `system_fingerprint` → **GO / NO-GO / INCONCLUSIVE** | arithmetic regression shipped with a new backend build → NO-GO; flaky case → INCONCLUSIVE |
+| Scenario | What it proves from the API | Example regression it catches |
+|---|---|---|
+| **Inference** (`inference`) | The client contract: usage arithmetic, stream usage, `max_completion_tokens`, stop sequences, strict JSON schema, tool calls (incl. streamed argument reassembly), `reasoning_effort=none`, error codes 401/404/400 | `total_tokens` ≠ prompt + completion (billing), stream drops usage (metering) |
+| **Accelerator** (`accelerator`) | Hardware behaviour as the API exposes it: server decode tok/s (`time_info.completion_time`), prefill rate vs prompt length, TTFT split into queue / prefill / network, prompt-cache effect, T=0 reproducibility, logprob drift | decode 2,000 → 200 tok/s (kernel regression); same tokens but logprobs drift (numerics) |
+| **Cluster** (`cluster`) | Concurrency sweep 1→4→8: latency inflation, error rate after retries, 429 absorption (`retry-after`, then jittered backoff), rate-limit headroom headers, request isolation | latency grows with in-flight load; a request receives *another* request's answer |
+| **Release** (`release`) | Golden suite with checkable answers, repeated at T=0, diffed against a recorded baseline with `system_fingerprint` → **GO / NO-GO / INCONCLUSIVE** | arithmetic regression shipped with a new backend build → NO-GO; flaky case → INCONCLUSIVE |
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebras.ai → API Keys)
 .venv/bin/python -m iws chat "Why is fast inference important?"
-.venv/bin/python -m iws run                         # all four workflows, ~80 small requests
+.venv/bin/python -m iws run                         # all four scenarios, ~80 small requests
 .venv/bin/python -m iws run -w release --update-baseline   # record the live release baseline once
 .venv/bin/python -m iws run -w accelerator,cluster
 ```

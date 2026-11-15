@@ -1,4 +1,4 @@
-"""Accelerator SDET (GPU / wafer-scale): performance and numerics, observed from the API.
+"""Accelerator (GPU / wafer-scale): performance and numerics, observed from the API.
 
 A hosted endpoint hides the hardware, but the hardware still shows up in what the
 API returns: decode throughput (server time_info), prefill rate vs prompt length,

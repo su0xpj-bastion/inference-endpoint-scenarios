@@ -1,4 +1,4 @@
-"""CLI: run SDET workflows against the live Cerebras API or the local mock.
+"""CLI: run the Inference / Accelerator / Cluster / Release scenarios against the live Cerebras API or the local mock.
 
   python -m iws run                      # all workflows, live (needs CEREBRAS_API_KEY)
   python -m iws run --target mock        # all workflows against an in-process mock
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     p = argparse.ArgumentParser(prog="iws")
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="run SDET workflows")
+    r = sub.add_parser("run", help="run scenarios")
     r.add_argument("--target", choices=("live", "mock"), default="live")
     r.add_argument("-w", "--workflow", default="all", help=f"all or comma list of {','.join(WORKFLOWS)}")
     r.add_argument("--model", default=os.environ.get("CEREBRAS_MODEL", MODEL))

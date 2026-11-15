@@ -1,4 +1,4 @@
-"""Cluster / capacity SDET: behaviour under concurrent load.
+"""Cluster: behaviour under concurrent load.
 
 From the client side a serving cluster is: how latency degrades as concurrency
 rises, whether 429s are absorbed by backoff or leak out as errors, how much rate

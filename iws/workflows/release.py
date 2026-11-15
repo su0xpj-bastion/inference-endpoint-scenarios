@@ -1,4 +1,4 @@
-"""Release SDET: qualify a model / backend build against a golden suite and a baseline.
+"""Release: qualify a model / backend build against a golden suite and a baseline.
 
 Every case has a machine-checkable answer. Each case runs `reps` times at T=0 so
 a flaky case is told apart from a regression:
