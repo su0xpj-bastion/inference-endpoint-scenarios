@@ -1,1 +1,1 @@
-"""iws: inference workflow scenarios (Inference, Accelerator, Cluster, Release) for the Cerebras Inference API."""
+"""iws: inference endpoint scenarios (Inference, Accelerator, Cluster, Release) for the Cerebras Inference API."""

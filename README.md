@@ -1,4 +1,4 @@
-# inference-workflow-scenarios
+# inference-endpoint-scenarios
 
 One harness, four scenarios (Inference, Accelerator, Cluster, Release), run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
 
