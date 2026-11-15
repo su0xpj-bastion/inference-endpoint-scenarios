@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import cerebras.cloud.sdk as cerebras
+import jsonschema
+import openai
 
 from .client import Budget, Call, chat
 
@@ -91,5 +93,11 @@ def guarded(workflow: str, name: str, fn: Callable[[], Check], gated: bool = Tru
         return Check(workflow, name, "fail", f"HTTP {exc.status_code}: {exc.message}", gated)
     except cerebras.APIError as exc:
         return Check(workflow, name, "fail", f"API error: {exc}", gated)
-    except (AssertionError, ValueError, KeyError, RuntimeError) as exc:
+    except openai.APIStatusError as exc:
+        return Check(workflow, name, "fail", f"HTTP {exc.status_code} (openai sdk): {exc.message}", gated)
+    except openai.APIError as exc:
+        return Check(workflow, name, "fail", f"API error (openai sdk): {exc}", gated)
+    except jsonschema.ValidationError as exc:
+        return Check(workflow, name, "fail", f"schema violation: {exc.message}", gated)
+    except (AssertionError, ValueError, KeyError, RuntimeError, AttributeError, TypeError, IndexError) as exc:
         return Check(workflow, name, "fail", f"{type(exc).__name__}: {exc}", gated)

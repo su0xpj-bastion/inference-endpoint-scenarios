@@ -41,7 +41,37 @@
     "wire_ttft_gated": true,
     "agent_reps": 2,
     "agent_max_turns": 6,
-    "agent_loop_p50_max_s": 1.0
+    "agent_loop_p50_max_s": 1.0,
+    "conv_turns": 8,
+    "longctx_tokens_tolerance": 0.9,
+    "gist_pages": 8,
+    "gist_page_tokens": 300,
+    "gist_target_page": 6,
+    "compat_answer_gated": true,
+    "conv_cache_gated": true,
+    "needle_grid": [
+      [
+        4000,
+        0.5
+      ],
+      [
+        16000,
+        0.1
+      ],
+      [
+        16000,
+        0.5
+      ],
+      [
+        32000,
+        0.5
+      ],
+      [
+        32000,
+        0.9
+      ]
+    ],
+    "conv_uncached_share_max": 0.25
   },
   "live": {
     "_comment": "Provisional thresholds, calibrated from the first live runs; see docs/STRATEGY.md. Determinism and cache are reported, not gated: the API documents seed as best-effort and caching as automatic.",
@@ -86,6 +116,36 @@
     "wire_ttft_gated": false,
     "agent_reps": 2,
     "agent_max_turns": 6,
-    "agent_loop_p50_max_s": 10.0
+    "agent_loop_p50_max_s": 10.0,
+    "conv_turns": 8,
+    "longctx_tokens_tolerance": 0.9,
+    "gist_pages": 8,
+    "gist_page_tokens": 300,
+    "gist_target_page": 6,
+    "compat_answer_gated": false,
+    "conv_cache_gated": false,
+    "needle_grid": [
+      [
+        4000,
+        0.5
+      ],
+      [
+        12000,
+        0.5
+      ],
+      [
+        24000,
+        0.1
+      ],
+      [
+        24000,
+        0.5
+      ],
+      [
+        24000,
+        0.9
+      ]
+    ],
+    "conv_uncached_share_max": 0.25
   }
 }

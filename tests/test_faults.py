@@ -31,6 +31,12 @@ FAULT_CATCH = {
     "bad_tool_args": (["agent"], {"agent.agent_tool_args"}),           # model recovers; validator still flags
     "agent_loop_stall": (["agent"], {"agent.agent_task_success", "agent.agent_loop_latency"}),
     "ignore_tool_results": (["agent"], {"agent.agent_task_success"}),
+    "max_tokens_alias_ignored": (["compat"], {"compat.compat_max_tokens"}),
+    "history_truncated": (["conversation"], {"conversation.conversation_recall"}),
+    "cache_miss": (["conversation"], {"conversation.conversation_cache_growth",
+                                      "conversation.conversation_prefill_flat"}),
+    "context_truncated": (["longctx"], {"longctx.needle_recall", "longctx.context_accounting"}),
+    "lossy_gist": (["longctx"], {"longctx.gist_chain"}),
 }
 
 

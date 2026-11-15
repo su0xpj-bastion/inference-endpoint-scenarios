@@ -31,6 +31,11 @@ Faults (set on the server object, or MOCK_FAULTS=a,b for `python -m mockserve`):
   bad_tool_args      first conversion calls carry truncated (invalid) JSON arguments
   agent_loop_stall   after the first tool round the model keeps re-calling get_weather
   ignore_tool_results  final agent answer ignores the conversion results
+  max_tokens_alias_ignored  `max_tokens` (OpenAI-SDK spelling) ignored; only max_completion_tokens works
+  history_truncated  only the last 4 non-system messages reach the model (200 OK)
+  cache_miss         prompt cache never hits
+  context_truncated  each message silently clipped to ~8K tokens (200 OK)
+  lossy_gist         the page-6 summary drops its number
 """
 from __future__ import annotations
 
@@ -60,6 +65,7 @@ CACHE_BLOCK = 128
 RPM_LIMIT = 300
 UPLOAD_BPS = 4_000_000        # simulated client uplink, bytes/s
 DECOMPRESS_LIMIT = 32_768     # decompress_truncation fault: buffer cap
+CONTEXT_LIMIT = 8_192         # context_truncated fault: tokens kept per message
 VOCAB = ("wafer", "scale", "token", "latency", "kernel", "memory", "fabric", "batch", "decode",
          "prefill", "model", "cluster", "router", "tensor", "stream", "cache", "sparse", "weight",
          "compiler", "runtime", "the", "a", "of", "and", "to", "in", "is", "that", "for", "with")
@@ -187,6 +193,28 @@ def agent_answer(msgs: list[dict], state: State) -> str:
     return ", ".join(parts) or "No data."
 
 
+def context_answer(msgs: list[dict], prompt: str, state: State) -> str | None:
+    """Answers that depend on what actually reached the model: history and long context."""
+    if "What is my project codename" in prompt:
+        history = "\n".join(str(m.get("content") or "") for m in msgs[:-1])
+        m = re.search(r"codename is ([A-Z0-9-]+)", history)
+        return m[1] if m else "I don't know your codename."
+    if "secret launch code" in prompt:
+        m = re.search(r"secret launch code is ([A-Z]+-\d+)", prompt)
+        return m[1] if m else "I could not find a launch code."
+    if prompt.startswith("Summarize this page"):
+        page = re.search(r"Page (\d+)\.", prompt)
+        vault = re.search(r"vault number is (V-\d+)", prompt)
+        k = page[1] if page else "?"
+        if vault and not ("lossy_gist" in state.faults and k == "6"):
+            return f"Page {k} describes the archive and gives vault number {vault[1]}."
+        return f"Page {k} describes the archive."
+    if m := re.search(r"archive vault number on page (\d+)", prompt):
+        hit = re.search(rf"Page {m[1]} summary:[^\n]*?(V-\d+)", prompt)
+        return hit[1] if hit else "Not stated in the summaries."
+    return None
+
+
 def generate(body: dict, state: State, rid: str) -> dict:
     msgs = body["messages"]
     prompt = str(msgs[-1].get("content", ""))
@@ -217,7 +245,9 @@ def generate(body: dict, state: State, rid: str) -> dict:
         out["content"] = json.dumps({"name": m[1], "age": int(m[2])} if m else {"result": "ok"})
         return out
 
-    ans = golden_answer(prompt, state)
+    ans = context_answer(msgs, prompt, state)
+    if ans is None:
+        ans = golden_answer(prompt, state)
     if ans is not None:
         out["content"] = ans
     else:
@@ -240,7 +270,8 @@ def apply_limits(text: str, body: dict, state: State, reasoning_tokens: int = 0)
     for s in ([body["stop"]] if isinstance(body.get("stop"), str) else body.get("stop") or []):
         if s and s in text:
             text = text[: text.index(s)]
-    limit = body.get("max_completion_tokens") or body.get("max_tokens")
+    limit = body.get("max_completion_tokens") or (
+        None if "max_tokens_alias_ignored" in state.faults else body.get("max_tokens"))
     toks = TOKEN_RE.findall(text)
     room = None if not limit else max(0, limit - reasoning_tokens)
     if room is not None and len(toks) > room and "ignore_max_tokens" not in state.faults:
@@ -292,6 +323,20 @@ def _parse(raw: bytes, headers: object, state: State) -> dict:
         return json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"bad json: {exc}") from exc
+
+
+def apply_context_faults(body: dict, state: State) -> dict:
+    """Silent context loss, as a misconfigured gateway or server would cause it (200 OK)."""
+    msgs = body.get("messages") or []
+    if "history_truncated" in state.faults and len(msgs) > 5:
+        system = [m for m in msgs if m.get("role") == "system"]
+        body["messages"] = system + [m for m in msgs if m.get("role") != "system"][-4:]
+    if "context_truncated" in state.faults:
+        for m in body.get("messages") or []:
+            text = m.get("content")
+            if isinstance(text, str) and ntokens(text) > CONTEXT_LIMIT:
+                m["content"] = " ".join(text.split()[: int(CONTEXT_LIMIT * 0.9)])
+    return body
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -355,6 +400,7 @@ class Handler(BaseHTTPRequestHandler):
             body = decode_body(raw, self.headers, st)
         except ValueError as exc:
             return self._error(400, f"could not parse request body: {exc}", "invalid_request_error")
+        body = apply_context_faults(body, st)
         n = st.next_request()
 
         pkey = hashlib.sha256(json.dumps(body.get("messages"), sort_keys=True).encode()).hexdigest()
@@ -399,18 +445,25 @@ class Handler(BaseHTTPRequestHandler):
         msgs = body["messages"]
         all_text = "\n".join(str(m.get("content") or "") for m in msgs)
         prompt_tokens = ntokens(all_text) + 3 * len(msgs)
-        prefix = "\n".join(str(m.get("content") or "") for m in msgs[:-1])
-        key = (body.get("prompt_cache_key") or "") + "|" + hashlib.sha256(prefix.encode()).hexdigest()
+        # Prefix cache: the longest run of leading messages seen before (same prompt_cache_key
+        # namespace) is served from cache, rounded down to whole blocks. An identical prompt
+        # re-uses all but its last block.
+        ns = body.get("prompt_cache_key") or ""
+        h = hashlib.sha256(ns.encode())
+        prefix_keys = []
+        for m in msgs:
+            h.update(json.dumps([m.get("role"), str(m.get("content") or "")]).encode())
+            prefix_keys.append(h.hexdigest())
         cached = 0
-        full_key = (body.get("prompt_cache_key") or "") + "|full|" + hashlib.sha256(all_text.encode()).hexdigest()
         with st.lock:
-            if full_key in st.cache:                       # identical prompt seen before
-                cached = ((prompt_tokens - 1) // CACHE_BLOCK) * CACHE_BLOCK
-            elif prefix and key in st.cache:               # shared prefix (system / history) seen before
-                cached = (ntokens(prefix) // CACHE_BLOCK) * CACHE_BLOCK
-            st.cache.add(full_key)
-            if prefix:
-                st.cache.add(key)
+            if "cache_miss" not in st.faults:
+                for k in range(len(msgs), 0, -1):
+                    if prefix_keys[k - 1] in st.cache:
+                        ptoks = prompt_tokens - 1 if k == len(msgs) else \
+                            ntokens("\n".join(str(m.get("content") or "") for m in msgs[:k])) + 3 * k
+                        cached = (ptoks // CACHE_BLOCK) * CACHE_BLOCK
+                        break
+            st.cache.update(prefix_keys)
 
         gen = generate(body, st, rid)
         reasoning_tokens = ntokens(gen["reasoning"])

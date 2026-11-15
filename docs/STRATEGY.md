@@ -1,4 +1,4 @@
-# Strategy: six scenarios against one hosted inference endpoint
+# Strategy: nine scenarios against one hosted inference endpoint
 
 ## One client, four questions
 Every workflow goes through the same `client.chat()`: same retry policy (429 only; `retry-after` first, then `2**attempt + jitter`; SDK retries off so retries are counted, not hidden), same capture (usage, `time_info`, fingerprint, rate-limit headers, per-chunk timestamps). A difference between workflows is then a difference in the question asked, never in the plumbing.
@@ -25,6 +25,12 @@ Compression is a transport optimization; the risk is that the server decodes a d
 
 ## Agent: the loop is the unit
 An agent user waits on plan → tools → answer, so latency is gated on the loop, with per-turn TTFT as the diagnosis. Tool-argument validity is gated separately from task success, because a model that recovers from its own malformed call still pays a wasted round trip, and that recovery hides the bug from an outcome-only check.
+
+## Compat: two clients, one contract
+Most third-party tooling reaches Cerebras through the OpenAI SDK, so compatibility is tested as parity: the same request through both SDKs must give the same usage and behaviour. The check worth having is `max_tokens`: OpenAI-SDK code still sends the old spelling, and a server that only honours `max_completion_tokens` would return 33x the tokens the caller budgeted, with no error.
+
+## Silent context loss
+Conversation and Long context both target 200-OK failures where the model never saw part of the prompt. Recall checks catch it when the lost part mattered; `prompt_tokens` accounting catches it even when it didn't (a clipped haystack whose needle happened to survive). The cache checks use the uncached share of each turn's prompt, not prefill time: with a large fixed system prompt, total prefill time barely moves even with no cache at all, so it can't distinguish a working cache from a dead one.
 
 ## Client SDK is part of the release
 The SDK matrix runs the suite across pinned SDK releases plus a non-blocking "latest" canary. It found that SDK < 1.59 returns a nested usage field as a dict, which led to a declared minimum version and to newer API params going through `extra_body`.
