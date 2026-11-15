@@ -1,0 +1,54 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * *"
+
+jobs:
+  mock:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest
+      - name: harness on healthy mock (must pass)
+        run: python -m csdet run --target mock --out reports/healthy
+      - name: harness with injected faults (must fail)
+        run: |
+          if python -m csdet run --target mock --faults slow_decode,crosstalk,usage_drift --out reports/faults; then
+            echo "faults were not detected"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mock-reports
+          path: reports/
+
+  live:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: harness against api.cerebras.ai
+        run: |
+          if [ -z "$CEREBRAS_API_KEY" ]; then
+            echo "CEREBRAS_API_KEY secret not set; skipping live run" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          python -m csdet run --target live --out reports/live
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-report
+          path: reports/
