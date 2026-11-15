@@ -6,6 +6,7 @@ are identical across scenarios. The SDK's own retries are disabled
 """
 from __future__ import annotations
 
+import gzip
 import json
 import random
 import threading
@@ -13,9 +14,19 @@ import time
 from dataclasses import dataclass, field
 
 import cerebras.cloud.sdk as cerebras
+import httpx
+import msgpack
 
 MAX_ATTEMPTS = 3
 MAX_RETRY_AFTER = 30.0
+# Oldest cerebras_cloud_sdk this harness supports, found by the CI SDK matrix:
+# < 1.59 returns usage.completion_tokens_details as a plain dict, and < 1.50 has no
+# reasoning_effort. Newer API params (prompt_cache_key) go through extra_body.
+MIN_SDK = (1, 59, 0)
+
+
+def sdk_version() -> tuple[int, ...]:
+    return tuple(int(x) for x in cerebras.__version__.split(".")[:3] if x.isdigit())
 
 
 class Budget:
@@ -59,9 +70,52 @@ class Call:
     logprobs: list[tuple[str, float]] = field(default_factory=list)
 
 
-def make_client(api_key: str | None, base_url: str | None) -> cerebras.Cerebras:
+ENCODINGS = {
+    # name: (Content-Type, Content-Encoding or None, encoder)
+    "json": ("application/json", None, lambda p: json.dumps(p).encode()),
+    "gzip": ("application/json", "gzip", lambda p: gzip.compress(json.dumps(p).encode())),
+    "msgpack": ("application/vnd.msgpack", None, lambda p: msgpack.packb(p)),
+    # msgpack inside, gzip outside: the order the server requires
+    "msgpack+gzip": ("application/vnd.msgpack", "gzip", lambda p: gzip.compress(msgpack.packb(p))),
+}
+
+
+class EncodingTransport(httpx.HTTPTransport):
+    """Re-encodes the SDK's JSON body for chat completions as msgpack and/or gzip.
+
+    The request still goes through client.chat.completions.create(); only the
+    bytes on the wire change. `sent` records (json_bytes, wire_bytes) per request.
+    """
+
+    def __init__(self, encoding: str) -> None:
+        super().__init__()
+        self.encoding = encoding
+        self.sent: list[tuple[int, int]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if self.encoding == "json" or not request.url.path.endswith("/chat/completions"):
+            return super().handle_request(request)
+        raw = request.read()
+        ctype, cenc, encode = ENCODINGS[self.encoding]
+        body = encode(json.loads(raw))
+        self.sent.append((len(raw), len(body)))
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in ("content-length", "content-type")}
+        headers["content-type"] = ctype
+        if cenc:
+            headers["content-encoding"] = cenc
+        return super().handle_request(httpx.Request(request.method, request.url, headers=headers, content=body,
+                                                    extensions=request.extensions))
+
+
+def make_client(api_key: str | None, base_url: str | None, encoding: str = "json") -> cerebras.Cerebras:
+    if sdk_version() < MIN_SDK:
+        raise RuntimeError(f"cerebras_cloud_sdk {cerebras.__version__} is older than the supported minimum "
+                           f"{'.'.join(map(str, MIN_SDK))}; pip install -U cerebras_cloud_sdk")
+    http_client = None
+    if encoding != "json":
+        http_client = cerebras.DefaultHttpxClient(transport=EncodingTransport(encoding))
     return cerebras.Cerebras(api_key=api_key, base_url=base_url, max_retries=0,
-                             warm_tcp_connection=False, timeout=120.0)
+                             warm_tcp_connection=False, timeout=120.0, http_client=http_client)
 
 
 def _backoff(exc: cerebras.RateLimitError, attempt: int) -> float:
@@ -106,7 +160,7 @@ def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: b
         call.reasoning = choice.message.reasoning or ""
         call.finish_reason = choice.finish_reason
         for tc in choice.message.tool_calls or []:
-            call.tool_calls.append({"name": tc.function.name, "arguments": tc.function.arguments})
+            call.tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments})
         if choice.logprobs is not None and choice.logprobs.content:
             call.logprobs = [(c.token, c.logprob) for c in choice.logprobs.content]
         _take_usage(call, resp.usage, resp.time_info)
@@ -132,7 +186,8 @@ def _once(client: cerebras.Cerebras, model: str, messages: list[dict], stream: b
                 if delta.reasoning:
                     reasoning.append(delta.reasoning)
                 for tc in delta.tool_calls or []:
-                    slot = tools.setdefault(tc.index or 0, {"name": "", "arguments": ""})
+                    slot = tools.setdefault(tc.index or 0, {"id": "", "name": "", "arguments": ""})
+                    slot["id"] = tc.id or slot["id"]
                     if tc.function is not None:
                         slot["name"] += tc.function.name or ""
                         slot["arguments"] += tc.function.arguments or ""

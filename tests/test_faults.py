@@ -25,6 +25,12 @@ FAULT_CATCH = {
     "logprob_noise": (["accelerator"], {"accelerator.logprob_stability"}),
     "contention": (["cluster"], {"cluster.concurrency_latency"}),
     "crosstalk": (["cluster"], {"cluster.request_isolation"}),
+    "gzip_ignored": (["wire"], {"wire.wire_equivalence", "wire.wire_ttft"}),
+    "msgpack_as_json": (["wire"], {"wire.wire_equivalence", "wire.wire_ttft"}),
+    "decompress_truncation": (["wire"], {"wire.wire_equivalence"}),     # 200 OK, silently shorter prompt
+    "bad_tool_args": (["agent"], {"agent.agent_tool_args"}),           # model recovers; validator still flags
+    "agent_loop_stall": (["agent"], {"agent.agent_task_success", "agent.agent_loop_latency"}),
+    "ignore_tool_results": (["agent"], {"agent.agent_task_success"}),
 }
 
 

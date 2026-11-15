@@ -7,3 +7,5 @@
 - Adding a check: add the fault that it exists to catch to `mockserve/server.py` and pin it in `tests/test_faults.py`.
 - Cost: `(tokens / 1000) * rate`, prompt and completion separately (`ies/cli.py: RATES`).
 - `pytest` must pass offline; live runs need `CEREBRAS_API_KEY` in `.env`.
+- Minimum `cerebras_cloud_sdk` is `MIN_SDK` in `ies/client.py`; API params newer than that SDK go through `extra_body`. The CI `sdk-matrix` job enforces it.
+- Compressed bodies go through `EncodingTransport` (still `client.chat.completions.create`), never hand-rolled HTTP.

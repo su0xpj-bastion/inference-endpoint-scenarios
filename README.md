@@ -1,6 +1,6 @@
 # inference-endpoint-scenarios
 
-One harness, four scenarios (Inference, Accelerator, Cluster, Release), run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
+One harness, six scenarios (Inference, Accelerator, Cluster, Release, Wire, Agent), run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
 
 Each scenario looks at the same endpoint and asks a different question:
 
@@ -10,13 +10,15 @@ Each scenario looks at the same endpoint and asks a different question:
 | **Accelerator** (`accelerator`) | Hardware behaviour as the API exposes it: server decode tok/s (`time_info.completion_time`), prefill rate vs prompt length, TTFT split into queue / prefill / network, prompt-cache effect, T=0 reproducibility, logprob drift | decode 2,000 → 200 tok/s (kernel regression); same tokens but logprobs drift (numerics) |
 | **Cluster** (`cluster`) | Concurrency sweep 1→4→8: latency inflation, error rate after retries, 429 absorption (`retry-after`, then jittered backoff), rate-limit headroom headers, request isolation | latency grows with in-flight load; a request receives *another* request's answer |
 | **Release** (`release`) | Golden suite with checkable answers, repeated at T=0, diffed against a recorded baseline with `system_fingerprint` → **GO / NO-GO / INCONCLUSIVE** | arithmetic regression shipped with a new backend build → NO-GO; flaky case → INCONCLUSIVE |
+| **Wire** (`wire`) | Compressed request bodies (`application/vnd.msgpack`, `Content-Encoding: gzip`): all four encodings reach the server as the same request (same `prompt_tokens`, same answer); bytes saved per prompt size; TTFT json vs msgpack+gzip on a warm-cache 16K-token prompt | a decompression buffer that silently truncates the prompt (200 OK, fewer `prompt_tokens`); a proxy that drops `Content-Encoding` |
+| **Agent** (`agent`) | A two-round tool-calling loop (parallel `get_weather` → `convert_c_to_f` → answer): task success, every tool argument schema-valid, end-to-end loop latency and per-turn TTFT, whether the model actually used the tools | agent never stops calling tools; ignores tool results; emits truncated JSON arguments |
 
 ```mermaid
 flowchart LR
     CLI[python -m ies run] --> C[client.chat<br/>stream · retry 429 · usage · time_info · headers]
     C -->|--target live| API[(api.cerebras.ai)]
-    C -->|--target mock| M[mockserve<br/>same wire format<br/>+ 15 injectable faults]
-    CLI --> W1[inference] & W2[accelerator] & W3[cluster] & W4[release]
+    C -->|--target mock| M[mockserve<br/>same wire format<br/>+ 21 injectable faults]
+    CLI --> W1[inference] & W2[accelerator] & W3[cluster] & W4[release] & W5[wire] & W6[agent]
     W4 --> B[(baselines/target-model.json)]
     CLI --> R[reports/report.md + .json<br/>CI job summary]
 ```
@@ -27,7 +29,7 @@ flowchart LR
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebras.ai → API Keys)
 .venv/bin/python -m ies chat "Why is fast inference important?"
-.venv/bin/python -m ies run                         # all four scenarios, ~80 small requests
+.venv/bin/python -m ies run                         # all six scenarios, ~100 requests
 .venv/bin/python -m ies run -w release --update-baseline   # record the live release baseline once
 .venv/bin/python -m ies run -w accelerator,cluster
 ```
@@ -39,12 +41,12 @@ cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebr
 [TIME] ttft=… wall=… | server queue=… prefill=… decode=… (… tok/s) fp=…
 ```
 
-The default model is `qwen-3.8-27b` (300 RPM on the free tier) with `reasoning_effort="none"`, so the tests measure answers, not hidden reasoning. `--model gpt-oss-120b` works too, but its free-tier limit is 5 RPM, so the `cluster` sweep there measures throttling, not the cluster. A hard request budget per run (`max_requests` in `slo.json`) stops a buggy sweep from burning quota.
+The default model is `qwen-3.8-27b` (300 RPM on the free tier) with `reasoning_effort="none"`, so the tests measure answers, not hidden reasoning. `--model gpt-oss-120b` works too, but its free-tier limit is 5 RPM, so the `cluster` sweep there measures throttling, not the cluster. A hard request budget per run (`max_requests` in `slo.json`) stops a buggy sweep from burning quota. The wire scenario's 12K/16K-token prompts dominate token use (~200K prompt tokens per full run, mostly prompt-cache hits); everything else uses short prompts.
 
 ## Offline (CI, no key)
 
 ```bash
-.venv/bin/python -m pytest                                    # 30 tests, ~40s
+.venv/bin/python -m pytest                                    # 42 tests, ~50s
 .venv/bin/python -m ies run --target mock                   # healthy: all workflows pass
 .venv/bin/python -m ies run --target mock --faults slow_decode,crosstalk
 ```
@@ -68,12 +70,38 @@ The mock speaks the real wire format (SSE chunks, final usage + `time_info` chun
 | `regress_math` + `fingerprint_v2` | release → **NO-GO**, names the regressed cases and the fingerprint change |
 | `flaky_answers` | release → **INCONCLUSIVE**, not NO-GO |
 | `fingerprint_v2` alone | release → GO with a warning |
+| `gzip_ignored` | wire.wire_equivalence, wire.wire_ttft (400) |
+| `msgpack_as_json` | wire.wire_equivalence, wire.wire_ttft (400) |
+| `decompress_truncation` | wire.wire_equivalence: 200 OK but `prompt_tokens` 12,364 (json) vs 5,765 (gzip); only a cross-encoding comparison sees it |
+| `bad_tool_args` | agent.agent_tool_args (the model recovers after the error result, so task success alone would miss it) |
+| `agent_loop_stall` | agent.agent_task_success, agent.agent_loop_latency |
+| `ignore_tool_results` | agent.agent_task_success (`Paris=18F`: Celsius passed off as Fahrenheit) |
 
 ## CI
 
 `.github/workflows/ci.yml`:
 - **mock** (every push / PR): tests, then the full harness healthy, then a fault run that must fail.
+- **sdk-matrix** (every push / PR): the full suite against `cerebras_cloud_sdk` 1.59.0, 1.67.0, 1.91.0, and the latest PyPI release (canary, doesn't block). See below.
 - **live** (nightly + manual dispatch): the full harness against `api.cerebras.ai` using the `CEREBRAS_API_KEY` repo secret, report posted to the job summary. It skips cleanly if the secret isn't set.
+
+## SDK matrix: what it found
+
+Qualifying the client SDK is part of a release too. Running the suite across `cerebras_cloud_sdk` versions found:
+
+| SDK | Result |
+|---|---|
+| 1.35.0 | no `reasoning_effort` parameter; no `delta.reasoning` |
+| 1.50.1 | `usage.completion_tokens_details` comes back as a plain dict, so `.reasoning_tokens` raises `AttributeError` |
+| 1.59.0, 1.67.0 | pass, once `prompt_cache_key` goes through `extra_body` (the typed parameter only exists in newer SDKs) |
+| 1.91.0 | pass |
+
+So the harness declares a minimum (`MIN_SDK = 1.59.0` in `ies/client.py`) and refuses older SDKs with an upgrade message instead of a confusing `AttributeError` mid-run, and it sends newer API parameters through `extra_body`.
+
+## Built from Cerebras's own examples
+
+- **Wire** follows [cerebras/inference-examples/payload-compression](https://github.com/cerebras/inference-examples/tree/main/payload-compression): same encodings, same warm-cache method. It adds what a test needs: every encoding must produce the *same request* on the server, not just a faster one.
+- **Agent** is the shape of the agentic workflow examples in that repo (LangChain / LlamaIndex / multi-agent), reduced to a deterministic task with checkable answers.
+- **SDK matrix** targets [cerebras/cerebras-cloud-sdk-python](https://github.com/cerebras/cerebras-cloud-sdk-python) releases.
 
 ## Where this stops
 
@@ -81,5 +109,7 @@ The mock speaks the real wire format (SSE chunks, final usage + `time_info` chun
 - The cluster sweep is small by design (≤ 8 concurrent) to stay inside free-tier limits and respect a shared service. It measures the shape of the latency curve, not capacity limits.
 - Live thresholds in `slo.json` are provisional until calibrated from repeated live runs. Seed determinism and prompt caching are reported but not gated on live, because the API documents both as best-effort.
 - The golden suite is 8 cases with exact answers: a release smoke gate, not a model eval.
+- The mock simulates uplink bandwidth (4 MB/s) so compression shows a TTFT effect offline; the live wire TTFT delta depends on your network and is reported, not gated.
+- CSL kernel examples ([cerebras/sdk-examples](https://github.com/cerebras/sdk-examples)) need the Cerebras SDK and fabric simulator, so they are out of scope here.
 
 See [docs/STRATEGY.md](docs/STRATEGY.md) for why each signal gates or doesn't.

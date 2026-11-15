@@ -73,7 +73,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     ctx = Ctx(client=make_client(api_key, base_url), model=args.model, target=args.target, slo=slo,
               budget=budget, bad_key_client=lambda: make_client("ies-invalid-key", base_url),
               base_params={"reasoning_effort": "none"} if args.model in NO_REASONING else {},
-              baseline_dir=args.baselines, update_baseline=args.update_baseline)
+              baseline_dir=args.baselines, update_baseline=args.update_baseline,
+              api_key=api_key, base_url=base_url)
     names = list(WORKFLOWS) if args.workflow == "all" else args.workflow.split(",")
     checks: list[Check] = []
     try:

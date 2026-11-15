@@ -24,5 +24,6 @@ def make_ctx(mock, tmp_path):
         return Ctx(client=make_client(API_KEY, base_url), model="qwen-3.8-27b", target="mock",
                    slo=load_slo("mock"), budget=Budget(500),
                    bad_key_client=lambda: make_client("wrong", base_url),
-                   base_params={"reasoning_effort": "none"}, baseline_dir=baseline_dir)
+                   base_params={"reasoning_effort": "none"}, baseline_dir=baseline_dir,
+                   api_key=API_KEY, base_url=base_url)
     return _make

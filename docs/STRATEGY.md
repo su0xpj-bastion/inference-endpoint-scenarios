@@ -1,4 +1,4 @@
-# Strategy: four scenarios against one hosted inference endpoint
+# Strategy: six scenarios against one hosted inference endpoint
 
 ## One client, four questions
 Every workflow goes through the same `client.chat()`: same retry policy (429 only; `retry-after` first, then `2**attempt + jitter`; SDK retries off so retries are counted, not hidden), same capture (usage, `time_info`, fingerprint, rate-limit headers, per-chunk timestamps). A difference between workflows is then a difference in the question asked, never in the plumbing.
@@ -19,6 +19,15 @@ Cerebras returns `time_info` (queue, prompt, completion, total). Client wall tim
 | Error rate after retries, retry ratio, latency inflation, isolation | gate | gate | capacity and correctness under concurrency |
 | Rate-limit headers | report | report | headroom context for the other numbers |
 | Release: regression vs baseline / flaky / pass rate | gate | gate | GO / NO-GO / INCONCLUSIVE |
+
+## Wire: compare encodings, not just speed
+Compression is a transport optimization; the risk is that the server decodes a different request than the client meant. The gate is cross-encoding equivalence (same `prompt_tokens`, same answer at T=0), because the dangerous failure is a 200 with a shorter prompt, which no single-encoding test can see. TTFT gain is measured on the same bytes every run (warm prompt cache), so only transfer and decode differ; it gates on the mock and is reported live, where it depends on the network.
+
+## Agent: the loop is the unit
+An agent user waits on plan → tools → answer, so latency is gated on the loop, with per-turn TTFT as the diagnosis. Tool-argument validity is gated separately from task success, because a model that recovers from its own malformed call still pays a wasted round trip, and that recovery hides the bug from an outcome-only check.
+
+## Client SDK is part of the release
+The SDK matrix runs the suite across pinned SDK releases plus a non-blocking "latest" canary. It found that SDK < 1.59 returns a nested usage field as a dict, which led to a declared minimum version and to newer API params going through `extra_body`.
 
 ## Release gate semantics
 - **Regression** (a case that passed in the baseline fails every rep) → NO-GO, naming the case and an example bad answer.

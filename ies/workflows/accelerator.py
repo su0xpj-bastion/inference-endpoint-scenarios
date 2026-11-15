@@ -84,7 +84,8 @@ def prompt_cache(ctx: Ctx) -> Check:
     key = f"ies-{uuid.uuid4().hex[:12]}"
     system = f"[{key}] " + _filler(ctx.slo["cache_prefix_tokens"])
     calls = [ctx.chat([{"role": "system", "content": system},
-                       {"role": "user", "content": q}], max_completion_tokens=4, prompt_cache_key=key)
+                       {"role": "user", "content": q}], max_completion_tokens=4,
+                       extra_body={"prompt_cache_key": key})   # typed param only in newer SDKs
              for q in ("Reply with only: one", "Reply with only: two")]
     first, second = calls
     hit = second.cached_tokens > 0

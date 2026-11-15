@@ -7,7 +7,7 @@ import cerebras.cloud.sdk as cerebras
 import pytest
 
 from ies import cli
-from ies.client import MAX_ATTEMPTS, Budget, chat, make_client
+from ies.client import ENCODINGS, MAX_ATTEMPTS, Budget, EncodingTransport, chat, make_client
 from ies.core import pct, tbt
 from mockserve.server import API_KEY
 
@@ -85,3 +85,24 @@ def test_cli_live_without_key_is_a_clean_error(monkeypatch, tmp_path):
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     assert cli.main(["run", "--target", "live", "--out", str(tmp_path)]) == 2
+
+
+@pytest.mark.parametrize("enc", [e for e in ENCODINGS if e != "json"])
+def test_encoded_bodies_reach_the_server_as_the_same_request(mock, enc):
+    base_url, _ = mock
+    msgs = [{"role": "user", "content": "compress me " * 400}]
+    plain = chat(make_client(API_KEY, base_url), "qwen-3.8-27b", msgs, temperature=0, max_completion_tokens=8)
+    client = make_client(API_KEY, base_url, enc)
+    encoded = chat(client, "qwen-3.8-27b", msgs, temperature=0, max_completion_tokens=8)
+    assert encoded.prompt_tokens == plain.prompt_tokens and encoded.content == plain.content
+    transport = client._client._transport
+    assert isinstance(transport, EncodingTransport) and transport.sent
+    json_bytes, wire_bytes = transport.sent[-1]
+    if "gzip" in enc:
+        assert wire_bytes < json_bytes / 5          # highly repetitive prompt
+
+
+def test_sdk_older_than_minimum_is_refused_with_a_clear_message(monkeypatch):
+    monkeypatch.setattr(cerebras, "__version__", "1.50.1")
+    with pytest.raises(RuntimeError, match="older than the supported minimum 1.59.0"):
+        make_client(API_KEY, "http://127.0.0.1:1")

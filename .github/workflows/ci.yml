@@ -30,6 +30,29 @@ jobs:
           name: mock-reports
           path: reports/
 
+  sdk-matrix:
+    # Client-SDK qualification: the same suite against the oldest supported SDK, two
+    # pinned releases, and whatever PyPI has today (canary: reports, doesn't block).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ["1.59.0", "1.67.0", "1.91.0", "latest"]
+    continue-on-error: ${{ matrix.sdk == 'latest' }}
+    name: sdk ${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: install cerebras_cloud_sdk ${{ matrix.sdk }}
+        run: |
+          if [ "${{ matrix.sdk }}" = "latest" ]; then pip install -U cerebras_cloud_sdk; else pip install "cerebras_cloud_sdk==${{ matrix.sdk }}"; fi
+          python -c "import cerebras.cloud.sdk as s; print('cerebras_cloud_sdk', s.__version__)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: python -m pytest
+
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

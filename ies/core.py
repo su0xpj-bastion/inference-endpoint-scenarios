@@ -31,6 +31,8 @@ class Ctx:
     base_params: dict = field(default_factory=dict)
     baseline_dir: str = "baselines"
     update_baseline: bool = False
+    api_key: str | None = None
+    base_url: str | None = None
 
     def chat(self, messages: list[dict] | str, *, stream: bool = False, **params: object) -> Call:
         if isinstance(messages, str):

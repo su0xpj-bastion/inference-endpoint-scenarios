@@ -25,9 +25,16 @@ Faults (set on the server object, or MOCK_FAULTS=a,b for `python -m mockserve`):
   crosstalk          concurrent requests can receive another request's answer
   rate_limit_light   every 3rd request gets 429 + retry-after; its retry succeeds
   rate_limit_storm   4 of 5 requests get 429 (retries exhaust)
+  gzip_ignored       Content-Encoding dropped (proxy): gzip bytes parsed as-is -> 400
+  msgpack_as_json    Content-Type ignored: msgpack bytes parsed as JSON -> 400
+  decompress_truncation  gzip bodies: message text silently cut at 32 KiB (200 OK)
+  bad_tool_args      first conversion calls carry truncated (invalid) JSON arguments
+  agent_loop_stall   after the first tool round the model keeps re-calling get_weather
+  ignore_tool_results  final agent answer ignores the conversion results
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -37,7 +44,10 @@ import re
 import threading
 import time
 import uuid
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import msgpack
 
 API_KEY = "mock-key"
 MODELS = ("qwen-3.8-27b", "gpt-oss-120b", "gemma-4-31b")
@@ -48,6 +58,8 @@ PREFILL_TPS = 200_000.0
 CHUNK_TOKENS = 4
 CACHE_BLOCK = 128
 RPM_LIMIT = 300
+UPLOAD_BPS = 4_000_000        # simulated client uplink, bytes/s
+DECOMPRESS_LIMIT = 32_768     # decompress_truncation fault: buffer cap
 VOCAB = ("wafer", "scale", "token", "latency", "kernel", "memory", "fabric", "batch", "decode",
          "prefill", "model", "cluster", "router", "tensor", "stream", "cache", "sparse", "weight",
          "compiler", "runtime", "the", "a", "of", "and", "to", "in", "is", "that", "for", "with")
@@ -113,6 +125,68 @@ def golden_answer(prompt: str, state: State) -> str | None:
     return None
 
 
+WEATHER = {"Paris": 18, "Tokyo": 22, "Berlin": 15, "Austin": 31}
+
+
+def _call(name: str, args: dict | str) -> dict:
+    return {"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function",
+            "function": {"name": name, "arguments": args if isinstance(args, str) else json.dumps(args)}}
+
+
+def _tool_results(msgs: list[dict]) -> list[dict]:
+    out = []
+    for m in msgs:
+        if m.get("role") == "tool":
+            try:
+                out.append(json.loads(m.get("content") or "{}"))
+            except json.JSONDecodeError:
+                out.append({})
+    return out
+
+
+def tool_policy(msgs: list[dict], tools: list[dict], body: dict, state: State) -> list[dict] | None:
+    """A scripted 'model' for tool use: weather lookups (parallel), then conversions, then answer.
+
+    Returns the next tool calls, or None when it's time to answer in text.
+    """
+    names = {t["function"]["name"] for t in tools}
+    task = next((str(m.get("content")) for m in msgs if m.get("role") == "user"), "")
+    results = _tool_results(msgs)
+    cities = [c for c in WEATHER if c in task] or \
+        [m[1] for m in [re.search(r"in ([A-Z][a-zA-Z]+)", task)] if m]
+    if "agent_loop_stall" in state.faults and results:
+        return [_call("get_weather", {"city": cities[0] if cities else "Paris"})]
+    if not cities and body.get("tool_choice") == "required":
+        cities = ["Paris"]
+    if "get_weather" in names or body.get("tool_choice") == "required":
+        wname = "get_weather" if "get_weather" in names else tools[0]["function"]["name"]
+        done = {r.get("city") for r in results if "temp_c" in r}
+        todo = [c for c in cities if c not in done]
+        if todo:
+            return [_call(wname, {"city": c}) for c in todo]
+    if "convert_c_to_f" in names:
+        temps = [r["temp_c"] for r in results if "temp_c" in r]
+        converted = {r.get("celsius") for r in results if "fahrenheit" in r}
+        todo_t = [t for t in temps if t not in converted]
+        if todo_t:
+            had_error = any("error" in r for r in results)
+            if "bad_tool_args" in state.faults and not had_error:
+                return [_call("convert_c_to_f", '{"celsius": %s,' % t) for t in todo_t]
+            return [_call("convert_c_to_f", {"celsius": t}) for t in todo_t]
+    return None
+
+
+def agent_answer(msgs: list[dict], state: State) -> str:
+    results = _tool_results(msgs)
+    city_c = {r["city"]: r["temp_c"] for r in results if "temp_c" in r}
+    c_to_f = {r["celsius"]: r["fahrenheit"] for r in results if "fahrenheit" in r}
+    parts = []
+    for city, c in city_c.items():
+        f = c if "ignore_tool_results" in state.faults else c_to_f.get(c, c)
+        parts.append(f"{city}={f}F")
+    return ", ".join(parts) or "No data."
+
+
 def generate(body: dict, state: State, rid: str) -> dict:
     msgs = body["messages"]
     prompt = str(msgs[-1].get("content", ""))
@@ -128,13 +202,14 @@ def generate(body: dict, state: State, rid: str) -> dict:
             prompt = others[0]
 
     tools = body.get("tools") or []
-    if tools and body.get("tool_choice", "auto") != "none" and (
-            "weather" in prompt.lower() or body.get("tool_choice") == "required"):
-        city = (re.search(r"in ([A-Z][a-zA-Z]+)", prompt) or [None, "Paris"])[1]
-        out["tool_calls"] = [{"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function",
-                              "function": {"name": tools[0]["function"]["name"],
-                                           "arguments": json.dumps({"city": city})}}]
-        return out
+    if tools and body.get("tool_choice", "auto") != "none":
+        calls = tool_policy(msgs, tools, body, state)
+        if calls is not None:
+            out["tool_calls"] = calls
+            return out
+        if any(m.get("role") == "tool" for m in msgs):
+            out["content"] = agent_answer(msgs, state)
+            return out
 
     rf = body.get("response_format") or {}
     if rf.get("type") in ("json_schema", "json_object"):
@@ -187,6 +262,36 @@ def logprob_entries(tokens: list[str], seed: object, state: State, top: int) -> 
             alts.append({"token": alt, "logprob": lp - j, "bytes": list(alt.encode())})
         out.append({"token": t, "logprob": lp, "bytes": list(t.encode()), "top_logprobs": alts[:top]})
     return out
+
+
+def decode_body(raw: bytes, headers: object, state: State) -> dict:
+    """Content-Encoding: gzip (outer) and Content-Type: application/vnd.msgpack (inner)."""
+    if headers.get("content-encoding", "").lower() == "gzip" and "gzip_ignored" not in state.faults:
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, zlib.error) as exc:
+            raise ValueError(f"bad gzip: {exc}") from exc
+        if "decompress_truncation" in state.faults:
+            body = _parse(raw, headers, state)
+            for m in body.get("messages", []):        # a size-capped buffer: 200 OK, shorter prompt
+                if isinstance(m.get("content"), str):
+                    m["content"] = m["content"][:DECOMPRESS_LIMIT]
+            return body
+    return _parse(raw, headers, state)
+
+
+def _parse(raw: bytes, headers: object, state: State) -> dict:
+    if not raw:
+        return {}
+    if "msgpack" in headers.get("content-type", "") and "msgpack_as_json" not in state.faults:
+        try:
+            return msgpack.unpackb(raw)
+        except (msgpack.exceptions.UnpackException, ValueError) as exc:
+            raise ValueError(f"bad msgpack: {exc}") from exc
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"bad json: {exc}") from exc
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -243,8 +348,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, f"no route {self.path}", "not_found_error")
         if not self._authed():
             return
-        body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
         st = self.state
+        raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+        time.sleep(len(raw) / UPLOAD_BPS)          # simulated client uplink: bytes cost time
+        try:
+            body = decode_body(raw, self.headers, st)
+        except ValueError as exc:
+            return self._error(400, f"could not parse request body: {exc}", "invalid_request_error")
         n = st.next_request()
 
         pkey = hashlib.sha256(json.dumps(body.get("messages"), sort_keys=True).encode()).hexdigest()
@@ -292,10 +402,14 @@ class Handler(BaseHTTPRequestHandler):
         prefix = "\n".join(str(m.get("content") or "") for m in msgs[:-1])
         key = (body.get("prompt_cache_key") or "") + "|" + hashlib.sha256(prefix.encode()).hexdigest()
         cached = 0
-        if prefix:
-            with st.lock:
-                if key in st.cache:
-                    cached = (ntokens(prefix) // CACHE_BLOCK) * CACHE_BLOCK
+        full_key = (body.get("prompt_cache_key") or "") + "|full|" + hashlib.sha256(all_text.encode()).hexdigest()
+        with st.lock:
+            if full_key in st.cache:                       # identical prompt seen before
+                cached = ((prompt_tokens - 1) // CACHE_BLOCK) * CACHE_BLOCK
+            elif prefix and key in st.cache:               # shared prefix (system / history) seen before
+                cached = (ntokens(prefix) // CACHE_BLOCK) * CACHE_BLOCK
+            st.cache.add(full_key)
+            if prefix:
                 st.cache.add(key)
 
         gen = generate(body, st, rid)
@@ -359,12 +473,14 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(reasoning_tokens / tps)
             send({**chunk, "choices": [{"index": 0, "delta": {"reasoning": gen["reasoning"]}}]})
         if tool_calls:
-            tc = tool_calls[0]
-            send({**chunk, "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "id": tc["id"], "type": "function",
-                 "function": {"name": tc["function"]["name"], "arguments": ""}}]}}]})
-            send({**chunk, "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "type": "function", "function": {"arguments": tc["function"]["arguments"]}}]}}]})
+            for i, tc in enumerate(tool_calls):
+                send({**chunk, "choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": i, "id": tc["id"], "type": "function",
+                     "function": {"name": tc["function"]["name"], "arguments": ""}}]}}]})
+                args = tc["function"]["arguments"]
+                for half in (args[: len(args) // 2], args[len(args) // 2:]):   # arguments arrive in fragments
+                    send({**chunk, "choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": i, "type": "function", "function": {"arguments": half}}]}}]})
         else:
             pieces = re.findall(r"\S+\s*", text) or [text]
             lp_items = (lp or {}).get("content") or []
