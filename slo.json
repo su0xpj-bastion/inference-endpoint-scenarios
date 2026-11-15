@@ -20,7 +20,7 @@
       4,
       8
     ],
-    "requests_per_slot": 2,
+    "requests_per_slot": 4,
     "max_retry_ratio": 0.5,
     "latency_floor_s": 0.05,
     "max_latency_inflation": 4.0,

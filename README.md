@@ -65,7 +65,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebras.ai → API Keys)
 .venv/bin/python -m ies chat "Why is fast inference important?"
 .venv/bin/python -m ies run --update-baseline    # first run: record release, numerics, model-list, benchmark baselines
-.venv/bin/python -m ies run                      # every scenario except soak, ~230 requests
+.venv/bin/python -m ies run                      # every scenario except soak, ~240 requests
 .venv/bin/python -m ies run -w soak              # 5 minutes at 1 rps
 .venv/bin/python -m ies run -w accelerator,cluster
 ```

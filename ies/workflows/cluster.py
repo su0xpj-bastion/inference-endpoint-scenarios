@@ -5,7 +5,8 @@ rises, whether 429s are absorbed by backoff or leak out as errors, how much rate
 limit headroom remains, and whether concurrent requests stay isolated (each
 gets its own answer, never a neighbour's: the batch-isolation property).
 
-Load is deliberately small (default 8 concurrent, ~50 requests) so a live run
+Each level starts with an unmeasured warm-up round (connection setup is not
+steady-state latency). Load is deliberately small (default 8 concurrent, ~60 requests) so a live run
 stays far inside free-tier limits; this measures the curve's shape, it isn't a
 stress test.
 """
@@ -42,8 +43,11 @@ def _sweep(ctx: Ctx) -> list[dict]:
     levels = []
     for level in ctx.slo["concurrency_levels"]:
         n = level * ctx.slo["requests_per_slot"]
-        t0 = time.perf_counter()
         with ThreadPoolExecutor(level) as pool:
+            # warm-up round, not measured: opens the connections this level needs, so
+            # connection setup isn't counted as steady-state latency
+            list(pool.map(lambda i: _one(ctx, -1 - i), range(level)))
+            t0 = time.perf_counter()
             res = list(pool.map(lambda i: _one(ctx, i), range(n)))
         elapsed = time.perf_counter() - t0
         ok = [r for r in res if r["ok"]]
