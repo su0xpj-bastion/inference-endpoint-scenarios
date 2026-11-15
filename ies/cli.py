@@ -1,9 +1,9 @@
 """CLI: run the Inference / Accelerator / Cluster / Release scenarios against the live Cerebras API or the local mock.
 
-  python -m iws run                      # all workflows, live (needs CEREBRAS_API_KEY)
-  python -m iws run --target mock        # all workflows against an in-process mock
-  python -m iws run --target mock --faults slow_decode -w accelerator
-  python -m iws chat "Why is fast inference important?"   # streamed chat + usage + cost
+  python -m ies run                      # all workflows, live (needs CEREBRAS_API_KEY)
+  python -m ies run --target mock        # all workflows against an in-process mock
+  python -m ies run --target mock --faults slow_decode -w accelerator
+  python -m ies chat "Why is fast inference important?"   # streamed chat + usage + cost
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     slo = load_slo(args.target)
     budget = Budget(args.max_requests or slo["max_requests"])
     ctx = Ctx(client=make_client(api_key, base_url), model=args.model, target=args.target, slo=slo,
-              budget=budget, bad_key_client=lambda: make_client("iws-invalid-key", base_url),
+              budget=budget, bad_key_client=lambda: make_client("ies-invalid-key", base_url),
               base_params={"reasoning_effort": "none"} if args.model in NO_REASONING else {},
               baseline_dir=args.baselines, update_baseline=args.update_baseline)
     names = list(WORKFLOWS) if args.workflow == "all" else args.workflow.split(",")
@@ -136,7 +136,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
-    p = argparse.ArgumentParser(prog="iws")
+    p = argparse.ArgumentParser(prog="ies")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run scenarios")
     r.add_argument("--target", choices=("live", "mock"), default="live")

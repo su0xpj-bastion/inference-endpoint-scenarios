@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from iws.cli import load_slo
-from iws.client import Budget, make_client
-from iws.core import Ctx
+from ies.cli import load_slo
+from ies.client import Budget, make_client
+from ies.core import Ctx
 from mockserve.server import API_KEY, serve
 
 

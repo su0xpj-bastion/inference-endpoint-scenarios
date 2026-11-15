@@ -6,9 +6,9 @@ import math
 import cerebras.cloud.sdk as cerebras
 import pytest
 
-from iws import cli
-from iws.client import MAX_ATTEMPTS, Budget, chat, make_client
-from iws.core import pct, tbt
+from ies import cli
+from ies.client import MAX_ATTEMPTS, Budget, chat, make_client
+from ies.core import pct, tbt
 from mockserve.server import API_KEY
 
 
