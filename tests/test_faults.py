@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from csdet.core import verdict
-from csdet.workflows import WORKFLOWS
+from iws.core import verdict
+from iws.workflows import WORKFLOWS
 
 # fault -> (workflows to run, exact set of failing checks)
 FAULT_CATCH = {

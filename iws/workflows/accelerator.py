@@ -81,7 +81,7 @@ def prefill_scaling(ctx: Ctx) -> Check:
 
 
 def prompt_cache(ctx: Ctx) -> Check:
-    key = f"csdet-{uuid.uuid4().hex[:12]}"
+    key = f"iws-{uuid.uuid4().hex[:12]}"
     system = f"[{key}] " + _filler(ctx.slo["cache_prefix_tokens"])
     calls = [ctx.chat([{"role": "system", "content": system},
                        {"role": "user", "content": q}], max_completion_tokens=4, prompt_cache_key=key)

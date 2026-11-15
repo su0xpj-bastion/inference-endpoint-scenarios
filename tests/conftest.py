@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from csdet.cli import load_slo
-from csdet.client import Budget, make_client
-from csdet.core import Ctx
+from iws.cli import load_slo
+from iws.client import Budget, make_client
+from iws.core import Ctx
 from mockserve.server import API_KEY, serve
 
 

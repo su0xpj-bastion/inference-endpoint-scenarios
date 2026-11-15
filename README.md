@@ -1,4 +1,4 @@
-# cerebras-inference-sdet
+# inference-workflow-scenarios
 
 One harness, four SDET workflows, run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with fault injection.
 
@@ -13,7 +13,7 @@ The four roles that test an inference platform look at the same endpoint and ask
 
 ```mermaid
 flowchart LR
-    CLI[python -m csdet run] --> C[client.chat<br/>stream · retry 429 · usage · time_info · headers]
+    CLI[python -m iws run] --> C[client.chat<br/>stream · retry 429 · usage · time_info · headers]
     C -->|--target live| API[(api.cerebras.ai)]
     C -->|--target mock| M[mockserve<br/>same wire format<br/>+ 15 injectable faults]
     CLI --> W1[inference] & W2[accelerator] & W3[cluster] & W4[release]
@@ -26,10 +26,10 @@ flowchart LR
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebras.ai → API Keys)
-.venv/bin/python -m csdet chat "Why is fast inference important?"
-.venv/bin/python -m csdet run                         # all four workflows, ~80 small requests
-.venv/bin/python -m csdet run -w release --update-baseline   # record the live release baseline once
-.venv/bin/python -m csdet run -w accelerator,cluster
+.venv/bin/python -m iws chat "Why is fast inference important?"
+.venv/bin/python -m iws run                         # all four workflows, ~80 small requests
+.venv/bin/python -m iws run -w release --update-baseline   # record the live release baseline once
+.venv/bin/python -m iws run -w accelerator,cluster
 ```
 
 `chat` is the quickstart done properly: streamed, 429-retried, and printed with usage, cost, and the server's own timing:
@@ -45,8 +45,8 @@ The default model is `qwen-3.8-27b` (300 RPM on the free tier) with `reasoning_e
 
 ```bash
 .venv/bin/python -m pytest                                    # 30 tests, ~40s
-.venv/bin/python -m csdet run --target mock                   # healthy: all workflows pass
-.venv/bin/python -m csdet run --target mock --faults slow_decode,crosstalk
+.venv/bin/python -m iws run --target mock                   # healthy: all workflows pass
+.venv/bin/python -m iws run --target mock --faults slow_decode,crosstalk
 ```
 
 The mock speaks the real wire format (SSE chunks, final usage + `time_info` chunk, `system_fingerprint`, `x-ratelimit-*` headers, SSE error events, error bodies), so the same client code runs against both. `tests/test_faults.py` pins **which check goes red for which fault**, so a detector can't silently stop working:

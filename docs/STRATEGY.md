@@ -33,4 +33,4 @@ Each fault in the mock is a real failure class. `tests/test_faults.py` pins the 
 - 429s are never forced on the live API; retry behaviour is proven on the mock.
 
 ## Calibrating live thresholds
-Run `python -m csdet run` on 5+ separate occasions, then set each floor *between* the observed healthy distribution and the regression you want to catch, never at the edge of the healthy one. Record the release baseline once with `--update-baseline` and commit it; the fingerprint in it is the build you qualified.
+Run `python -m iws run` on 5+ separate occasions, then set each floor *between* the observed healthy distribution and the regression you want to catch, never at the edge of the healthy one. Record the release baseline once with `--update-baseline` and commit it; the fingerprint in it is the build you qualified.
