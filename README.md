@@ -1,6 +1,8 @@
 # inference-endpoint-scenarios
 
-One harness, thirteen scenarios in four areas (Inference, Accelerator, Cluster, Release, plus real workloads), run **live against the Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) or against a wire-compatible local mock with 44 injectable faults. Every check has a fault it must catch, and the tests pin which check catches which fault.
+One harness, thirteen scenarios grouped into four areas (Inference, Accelerator, Cluster, Release) plus real-world workloads. It is built for the **Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) and also runs against a wire-compatible local mock with 44 injectable faults. Every check has a fault it must catch, and the tests pin which check catches which fault.
+
+> **Status:** CI runs everything against the mock on every push. The live path is implemented but has not been run yet (no API key configured), so every number in this README comes from the mock, not from Cerebras.
 
 ## Scenarios
 
@@ -11,7 +13,7 @@ One harness, thirteen scenarios in four areas (Inference, Accelerator, Cluster, 
 | **Inference** (`inference`) | Usage arithmetic, stream usage, `max_completion_tokens`, stop sequences, strict JSON schema, tool calls (incl. streamed argument reassembly), error codes; **parameter limits** (14 documented boundaries: in-range accepted, out-of-range 400, never a silent 200); **stream integrity** (CJK + emoji intact across chunks, stream = non-stream, a stop sequence spanning two chunks still stops); **logprobs contract** (k entries, sorted, ≤ 0, T=0 choice is top-1) | `total_tokens` ≠ prompt + completion; U+FFFD where an emoji was split; stop sequence matched only within one chunk |
 | **Reasoning** (`reasoning`) | `reasoning_effort` none ≤ low ≤ medium ≤ high in reasoning tokens; reasoning stays in `reasoning`, never in content (no `<think>`, no harmony `<\|channel\|>` markers); reasoning tokens billed inside `completion_tokens`; a tight budget ends `length`, not an empty `stop` | reasoning leaks into the answer; effort ignored; empty answer reported as complete |
 | **Schema** (`schema`) | Every response and stream chunk the other scenarios produced, validated against the official **OpenAI OpenAPI spec** ([openai/openai-openapi](https://github.com/openai/openai-openapi), pinned commit); Cerebras's additions listed separately (`time_info`, `reasoning`) | `created` as a string; `finish_reason: "eos"`: one off-spec enum value makes the typed SDK fall back to raw dicts for the whole chunk, which breaks three streaming checks too |
-| **Compat** (`compat`) | The same requests through the **OpenAI Python SDK** (`base_url=…/v1`, how Braintrust, Weave and LangChain call Cerebras) and `cerebras_cloud_sdk`: same usage, `include_usage`, `time_info` via `model_extra`, `max_tokens` honoured like `max_completion_tokens`, tools, strict JSON, `openai.*Error` types | server ignores `max_tokens` (401 tokens back for a limit of 12) |
+| **Compat** (`compat`) | The same requests through the **OpenAI Python SDK** (`base_url=…/v1`, the way the Braintrust and Weave examples call Cerebras) and `cerebras_cloud_sdk`: same usage, `include_usage`, `time_info` via `model_extra`, `max_tokens` honoured like `max_completion_tokens`, tools, strict JSON, `openai.*Error` types | server ignores `max_tokens` (401 tokens back for a limit of 12) |
 
 ### Accelerator: hardware effects, as the API shows them
 
@@ -41,7 +43,7 @@ One harness, thirteen scenarios in four areas (Inference, Accelerator, Cluster, 
 | **Wire** (`wire`) | msgpack / gzip request bodies reach the server as the same request; bytes saved; TTFT json vs msgpack+gzip | decompression buffer silently truncates the prompt (200 OK, 12,364 vs 5,765 prompt tokens) |
 | **Agent** (`agent`) | Two-round parallel tool loop: success, schema-valid arguments, loop latency, tool use | loop never ends; tool results ignored; truncated JSON arguments the model then recovers from |
 | **Conversation** (`conversation`) | Turn-1 fact recalled at turn 8; `cached_tokens` grows; turns 2-8 pay prefill for new messages only (~5% uncached) | gateway keeps the last 4 messages; cache never hits (5% → 100%) |
-| **Long context** (`longctx`) | Needle recall over length × depth up to 32K; `prompt_tokens` tracks the haystack; ReadAgent-style gist chain | context silently clipped at ~8K; a summary drops the needed number |
+| **Long context** (`longctx`) | Needle recall over length × depth (up to 32K on the mock, 24K live); `prompt_tokens` tracks the haystack; ReadAgent-style gist chain | context silently clipped at ~8K; a summary drops the needed number |
 
 ```mermaid
 flowchart LR
@@ -65,12 +67,12 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # put your key in CEREBRAS_API_KEY (cloud.cerebras.ai → API Keys)
 .venv/bin/python -m ies chat "Why is fast inference important?"
 .venv/bin/python -m ies run --update-baseline    # first run: record release, numerics, model-list, benchmark baselines
-.venv/bin/python -m ies run                      # every scenario except soak, ~240 requests
+.venv/bin/python -m ies run                      # every scenario except soak, a few hundred requests (hard cap 800)
 .venv/bin/python -m ies run -w soak              # 5 minutes at 1 rps
 .venv/bin/python -m ies run -w accelerator,cluster
 ```
 
-`chat` is the quickstart done properly: streamed, 429-retried, and printed with usage, cost, and the server's own timing:
+`chat` is the quickstart done properly: streamed, 429-retried, and printed with usage, cost, and the server's own timing (output format; values illustrative):
 
 ```
 [USAGE] prompt=15 completion=212 cached=0 cost=$0.000331
@@ -146,9 +148,11 @@ From [cerebras/inference-examples](https://github.com/cerebras/inference-example
 
 From OpenAI: Schema ([openai/openai-openapi](https://github.com/openai/openai-openapi)), Benchmark ([openai/grade-school-math](https://github.com/openai/grade-school-math)), Reasoning's control-marker list ([openai/harmony](https://github.com/openai/harmony), the response format of gpt-oss, which Cerebras serves). Both external sources are vendored at a pinned commit by `scripts/vendor_sources.py` (17 of the spec's 2,272 schemas; a seeded 50-item GSM8K slice).
 
-## The hardware side
+## Related repos
 
-This repo sees hardware only through the API. The same story on the other side of the API, with simulated clusters:
+This repo sees the platform and hardware only through the API. The other side of the API, all simulated:
+[inference-platform-qa](https://github.com/su0xpj-bastion/inference-platform-qa) (Kubernetes deployment path: ingress, load balancing, rolling deploys) ·
+[sampling-precision-validation](https://github.com/su0xpj-bastion/sampling-precision-validation) (token sampler and low-precision accuracy) ·
 [gpu-cluster-bringup](https://github.com/su0xpj-bastion/gpu-cluster-bringup) (bring-up and burn-in) ·
 [gpu-fabric-validation](https://github.com/su0xpj-bastion/gpu-fabric-validation) (collectives and interconnect) ·
 [gpu-fault-rca](https://github.com/su0xpj-bastion/gpu-fault-rca) (fault injection and root cause) ·
