@@ -1,5 +1,7 @@
 # inference-endpoint-scenarios
 
+> **Moved.** This project now lives in [inference-qa-lab/inference-endpoint-scenarios](https://github.com/su0xpj-bastion/inference-qa-lab/tree/main/inference-endpoint-scenarios), where it is maintained and tested. This repository is archived and read-only.
+
 One harness, thirteen scenarios grouped into four areas (Inference, Accelerator, Cluster, Release) plus real-world workloads. It is built for the **Cerebras Inference API** (`api.cerebras.ai`, Chat Completions via `cerebras_cloud_sdk`) and also runs against a wire-compatible local mock with 44 injectable faults. Every check has a fault it must catch, and the tests pin which check catches which fault.
 
 > **Status:** CI runs everything against the mock on every push. The live path is implemented but has not been run yet (no API key configured), so every number in this README comes from the mock, not from Cerebras.
